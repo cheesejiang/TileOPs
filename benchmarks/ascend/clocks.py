@@ -7,6 +7,7 @@ measurement. Policy changes happen only inside the host reservation.
 
 import ctypes
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -41,7 +42,7 @@ class ClockPolicy:
         # The 950 exposes the two components in the high 16 bits of the DSMI device ID.
         for device in (0, 1):
             info = _Frequency()
-            rc = self.driver.dsmi_get_aicore_info(device << 16, ctypes.byref(info))
+            rc = self.driver.dsmi_get_aicore_info((device << 16) | int(os.environ.get("TILEOPS_PHYSICAL_DEVICE", "0")), ctypes.byref(info))
             if rc:
                 raise RuntimeError(f"Cannot query component {device} frequency: {rc}")
             values.append({"rated_mhz": info.rated_mhz, "mhz": info.current_mhz})
@@ -72,3 +73,24 @@ class ClockPolicy:
     def __exit__(self, *_):
         subprocess.run(self.spec["restore"], check=True, timeout=30)
         self.after = self.read()
+
+
+class UnlockedPolicy:
+    """Development-only measurement; no frequency changes or formal acceptance."""
+
+    unlocked = True
+
+    def __init__(self):
+        self.samples = []
+        self.before = self.after = None
+
+    def check(self):
+        # Explicitly record that frequency was not controlled or verified.
+        self.samples.append({"locked": False, "frequency_verified": False})
+
+    def __enter__(self):
+        require_reservation()
+        return self
+
+    def __exit__(self, *_):
+        return False

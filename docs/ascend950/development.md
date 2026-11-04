@@ -29,6 +29,38 @@ dependencies with `--no-deps` to claim a compatible GPU benchmark stack.
 
 ## Shared benchmark
 
+### Multi-card development runs
+
+Use `--device N` to reserve one physical NPU on a multi-card host. The guard uses
+`device-N.lock`, queries that device through DSMI, and exposes only that card to
+the child (logical `npu:0`). Other cards may run other jobs. Generic manager/HDC
+handles are not attributable to one card; in this mode, only target-card device
+FDs and target-card DSMI contexts count as users. Processes still initializing
+through shared handles may therefore be detected only when their context appears.
+The guard continues to monitor foreign contexts during execution.
+
+For development measurements without clock locking or a fixed SKU/core count:
+
+```bash
+python scripts/benchmark_ascend.py --device 3 --unlocked \
+  --owner developer-name/gather \
+  --run-dir /shared/results/gather-dev-unique \
+  --op PagedKVCacheGatherFwdOp
+```
+
+`--unlocked` skips the benchmark's exact TileLang version and Ascend 950 name gates;
+the installed kernel/compiler must still support the hardware. Core counts and
+the physical card are recorded instead of imposing the canonical 32-Cube profile.
+The protocol is `ascend-profiler-unlocked-v1`, with `formal: false`; it retains
+correctness checks, profiler timing, warmup, all 15 samples and cache eviction.
+No frequency control or readback is attempted. Do not combine it with
+`--clock-config`. For correctness only, append `--verify-only`.
+
+Inspect the chosen card with `python scripts/npu_guard.py status --device 3 --json`.
+An administrator can initialize its lock with `python scripts/npu_guard.py init
+--device 3`. Omitting `--device` preserves the original single-card guard.
+These development results do not replace the formal protocol below.
+
 Every developer and baseline adapter uses this entry point from the same revision:
 
 ```bash

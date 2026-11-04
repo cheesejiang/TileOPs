@@ -16,6 +16,7 @@ def main():
         "--run-dir", type=Path, required=True, help="new directory; existing output is never reused"
     )
     parser.add_argument("--owner", required=True)
+    parser.add_argument("--device", type=int, help="physical NPU ID on a multi-card host")
     parser.add_argument("--wait", type=int, default=600)
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument(
@@ -25,6 +26,8 @@ def main():
         help="site-audited host guard Python entry; defaults to the bundled guard",
     )
     args, rest = parser.parse_known_args()
+    if args.device is not None and args.device < 0:
+        parser.error("--device must be nonnegative")
     if "--help" in rest:
         return 0
     run = args.run_dir.resolve()
@@ -37,6 +40,7 @@ def main():
         sys.executable,
         str(guard),
         "run",
+        *(["--device", str(args.device)] if args.device is not None else []),
         "--owner",
         args.owner,
         "--wait",

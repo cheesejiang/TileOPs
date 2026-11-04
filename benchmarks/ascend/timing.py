@@ -108,7 +108,9 @@ class ProfilerTimer:
             records.append(parsed)
         values = [r["latency_ms"] for r in records]
         return {
-            "protocol": PROTOCOL if not search else PROTOCOL + "-search",
+            "protocol": (PROTOCOL if not getattr(self.clocks, "unlocked", False)
+                         else "ascend-profiler-unlocked-v1") + ("-search" if search else ""),
+            "formal": not search and not getattr(self.clocks, "unlocked", False),
             "profiler": "torch_npu.profiler.profile",
             "metric": "mean_device_busy_union_ms",
             "warmup": warmup,

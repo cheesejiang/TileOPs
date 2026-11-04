@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host-wide cooperative reservation for this machine's single Ascend NPU.
+"""Host-wide cooperative reservation for one selected physical Ascend NPU.
 
 Only the Python standard library is required. See docs/ascend950/development.md.
 """
@@ -21,6 +21,8 @@ from pathlib import Path
 
 LOCK_DIR = Path("/run/lock/ascend-npu")
 LOCK_NAME = "device-0.lock"
+DEVICE = 0
+PER_DEVICE = False
 DRIVER = "/usr/local/Ascend/driver/lib64/driver/libdrvdsmi_host.so"
 SCRIPT = str(Path(__file__).resolve())
 PROBE_SCRIPTS = {SCRIPT, "/usr/local/bin/npu-guard"}
@@ -77,7 +79,7 @@ def readonly_guard_probe(entry):
     try:
         args = (entry / "cmdline").read_bytes().rstrip(b"\0").split(b"\0")
         return (
-            len(args) == 3
+            len(args) >= 3
             and args[2] == b"_probe"
             and os.path.realpath(os.fsdecode(args[1])) in PROBE_SCRIPTS
         )
@@ -104,6 +106,10 @@ def scan_device_fds(proc=Path("/proc")):
                     continue
                 if target.startswith(("/dev/davinci", "/dev/devmm", "/dev/hisi_hdc")):
                     nodes.add(target)
+            if PER_DEVICE:
+                # Shared manager/HDC handles cannot be attributed to one card.
+                # Per-device DSMI contexts remain authoritative for those users.
+                nodes = {n for n in nodes if n == f"/dev/davinci{DEVICE}"}
             if nodes and not readonly_guard_probe(entry):
                 candidates.append({**proc_identity(int(entry.name)), "nodes": sorted(nodes)})
         except (FileNotFoundError, ProcessLookupError):
@@ -147,10 +153,12 @@ def raw_probe():
     Ascend950 asys handler: get_device_info(MEMORY=9, HBM_MEMORY=35).
     Never initialize torch/ACL, submit work, reset, or alter device settings.
     """
-    result = {"time": now(), "device": 0, "errors": [], "utilization": {}}
+    result = {"time": now(), "device": DEVICE, "errors": [], "utilization": {}}
     try:
         devices = sorted(str(p) for p in Path("/dev").glob("davinci[0-9]*"))
-        if devices != ["/dev/davinci0"]:
+        if PER_DEVICE and f"/dev/davinci{DEVICE}" not in devices:
+            result["errors"].append(f"selected /dev/davinci{DEVICE} is unavailable")
+        if not PER_DEVICE and devices != ["/dev/davinci0"]:
             result["errors"].append(f"expected only /dev/davinci0; found {devices}")
         lib = C.CDLL(DRIVER)
         lib.dsmi_get_resource_info.argtypes = [
@@ -172,7 +180,7 @@ def raw_probe():
         pids = (C.c_int * 64)()
         para = ResourcePara(2, 0, 8, 0)
         info = ResourceInfo(C.sizeof(pids), C.cast(pids, C.c_void_p))
-        rc = lib.dsmi_get_resource_info(0, C.byref(para), C.byref(info))
+        rc = lib.dsmi_get_resource_info(DEVICE, C.byref(para), C.byref(info))
         result["pid_query_rc"] = rc
         result["pids"] = [proc_identity(pid) for pid in pids if pid > 0] if rc == 0 else []
         if rc == 0 and (info.buf_len > C.sizeof(pids) or any(pid < 0 for pid in pids)):
@@ -180,7 +188,7 @@ def raw_probe():
         if len(result["pids"]) == 64:
             result["errors"].append("process list may be truncated")
         health = C.c_uint()
-        rc = lib.dsmi_get_device_health(0, C.byref(health))
+        rc = lib.dsmi_get_device_health(DEVICE, C.byref(health))
         result["health"] = {"rc": rc, "value": health.value}
         for kind, name in [
             (2, "aicore"),
@@ -190,7 +198,7 @@ def raw_probe():
             (14, "cube"),
         ]:
             value = C.c_uint()  # Some current driver paths write only the low byte.
-            rc = lib.dsmi_get_device_utilization_rate(0, kind, C.byref(value))
+            rc = lib.dsmi_get_device_utilization_rate(DEVICE, kind, C.byref(value))
             result["utilization"][name] = {"rc": rc, "value": value.value}
             if rc == 0 and value.value > 100:
                 result["errors"].append(f"invalid {name} utilization")
@@ -198,7 +206,7 @@ def raw_probe():
             result["errors"].append("NPU overall utilization query failed")
         mem = MemoryInfo()
         size = C.c_uint(C.sizeof(mem))
-        rc = lib.dsmi_get_device_info(0, 9, 35, C.byref(mem), C.byref(size))
+        rc = lib.dsmi_get_device_info(DEVICE, 9, 35, C.byref(mem), C.byref(size))
         result["memory"] = {
             "rc": rc,
             "total_mib": mem.total_kib / 1024,
@@ -207,10 +215,10 @@ def raw_probe():
         result["core_frequency"] = []
         for component in (0, 1):
             freq = CoreFrequency()
-            rc = lib.dsmi_get_aicore_info(component << 16, C.byref(freq))
+            rc = lib.dsmi_get_aicore_info((component << 16) | DEVICE, C.byref(freq))
             result["core_frequency"].append({"rc": rc, "mhz": freq.current_mhz})
         power = C.c_ushort()
-        rc = lib.dsmi_get_device_power_info(0, C.byref(power))
+        rc = lib.dsmi_get_device_power_info(DEVICE, C.byref(power))
         result["power"] = {"rc": rc, "watts": power.value / 10}
     except (OSError, AttributeError) as exc:
         result["errors"].append(str(exc))
@@ -222,7 +230,7 @@ def raw_probe():
 def probe():
     try:
         completed = subprocess.run(
-            [sys.executable, SCRIPT, "_probe"],
+            [sys.executable, SCRIPT, "_probe", *(["--device", str(DEVICE)] if PER_DEVICE else [])],
             capture_output=True,
             text=True,
             timeout=10,
@@ -341,7 +349,8 @@ def execute(fd, metadata, command, timeout, grace=5, sample_fn=probe):
         old_handlers[sig] = signal.signal(sig, lambda number, frame: received.append(number))
     child = None
     try:
-        env = dict(os.environ, ASCEND_RT_VISIBLE_DEVICES="0", ASCEND_VISIBLE_DEVICES="0")
+        env = dict(os.environ, ASCEND_RT_VISIBLE_DEVICES=str(DEVICE),
+                   ASCEND_VISIBLE_DEVICES=str(DEVICE), TILEOPS_PHYSICAL_DEVICE=str(DEVICE))
         # A fresh session permits terminating only this invocation's process group.
         child = subprocess.Popen(command, pass_fds=(fd,), start_new_session=True, env=env)
         metadata.update(phase="running", child=proc_identity(child.pid))
@@ -413,7 +422,7 @@ def run(args, sample_fn=probe):
         **proc_identity(os.getpid()),
         "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
         "owner": args.owner,
-        "device": 0,
+        "device": DEVICE,
         "command": Path(command[0]).name,
         "phase": "waiting_lock",
         "requested_at": now(),
@@ -438,7 +447,7 @@ def run(args, sample_fn=probe):
                     if quiet_since is None:
                         quiet_since = time.monotonic()
                     if time.monotonic() - quiet_since >= args.idle_seconds:
-                        emit(f"acquired device 0 for {args.owner}")
+                        emit(f"acquired device {DEVICE} for {args.owner}")
                         result = execute(fd, metadata, command, args.timeout, sample_fn=sample_fn)
                         metadata.update(phase="finished", exit_code=result)
                         return result
@@ -489,7 +498,7 @@ def status(as_json):
     if as_json:
         print(json.dumps(sample, ensure_ascii=False))
     else:
-        print(f"device 0: {sample['state']}")
+        print(f"device {DEVICE}: {sample['state']}")
         print(json.dumps(sample, ensure_ascii=False, indent=2))
     return {"idle": 0, "busy": BUSY, "unknown": UNAVAILABLE}[sample["state"]]
 
@@ -526,7 +535,15 @@ def main():
     )
     job.add_argument("command", nargs=argparse.REMAINDER)
     subs.add_parser("_probe", help=argparse.SUPPRESS)
+    for sub in subs.choices.values():
+        sub.add_argument("--device", type=int, help="physical NPU ID; enable per-card checks")
     args = parser.parse_args()
+    global DEVICE, PER_DEVICE, LOCK_NAME
+    if args.device is not None:
+        if args.device < 0:
+            parser.error("--device must be nonnegative")
+        DEVICE, PER_DEVICE = args.device, True
+        LOCK_NAME = f"device-{DEVICE}.lock"
     try:
         if args.action == "_probe":
             print(json.dumps(raw_probe(), ensure_ascii=False))

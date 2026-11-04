@@ -71,67 +71,55 @@ python scripts/benchmark_ascend.py --owner gather/verify \
 
 ## 性能验证与调优
 
-正式性能测量必须遵循
-[Ascend 开发说明](../../../../../docs/ascend950/development.md)
-规定的时钟配置、设备预约和测量协议。
+### 多卡服务器上的开发测量（无需锁频或固定核数）
 
-### 运行性能测试
-
-先通过上述正确性验证，再在 `TileOPs` 仓库根目录执行：
+在 `TileOPs` 根目录执行，下面以物理卡 3 为例：
 
 ```bash
 python scripts/benchmark_ascend.py \
-  --owner gather/baseline \
-  --run-dir /shared/results/gather-baseline-001 \
-  --op PagedKVCacheGatherFwdOp \
-  --clock-config /site/ascend950-clocks.json
+  --device 3 --unlocked \
+  --owner gather/dev \
+  --run-dir "/shared/results/gather-dev-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp
 ```
 
-该命令默认测试全部 7 个 workload。参数说明：
+`--device` 是物理卡编号。保护程序只预约和检查该卡，使用独立的 `device-3.lock`，
+子进程中该卡映射为逻辑 `npu:0`；其他卡可以继续运行任务。
+共享 manager/HDC 句柄不能归属到某张卡，因此多卡模式不据此阻止运行，
+而是检查目标卡的设备句柄及 DSMI 驱动进程；尚未建立设备上下文的初始化进程可能稍后才被发现。
+运行过程中仍检查目标卡是否出现外部进程。
 
-- `--owner`：本次运行的负责人或实验名称，可替换为自己的标识。
-- `--run-dir`：新的结果目录，替换为本机可写路径，每次运行使用不同目录。
-- `--clock-config`：站点提供的有效锁频配置，包含锁频、恢复命令和两个组件的目标频率。
-  `/site/ascend950-clocks.json` 是路径示例，需要替换为实际配置；没有有效配置时不能进行正式性能测量。
-- 不传 `--verify-only`：执行正确性检查及性能测量。
+`--unlocked` 不执行锁频或频率读回，不要求固定 32 个 Cube 核、设备型号名称
+或精确的 TileLang 版本。它不替代底层内核与硬件的兼容性要求。
+实际设备型号、Cube/Vector 核数和物理卡编号会记录到 `environment.json`。
+仍执行精度检查、3 次预热、15 次 profiler 采样和缓存驱逐。
+不要同时传 `--clock-config`。
 
-如需优先测试最初关注的三个规格，在上述命令末尾追加：
+仅验证正确性时，在同一命令中追加 `--verify-only`。
+查看目标卡的状态：
 
 ```bash
---case-regex 'ds-v3-chunk-fp8|ds-v3-mixed|llama-70b-cp'
+python scripts/npu_guard.py status --device 3 --json
 ```
 
-启动器会在导入 NPU 运行时之前申请设备锁、检查设备占用，并监测运行期间的争用。
-当前正式协议为 `ascend950-profiler-locked-v1`：正确性检查和 JIT 设置完成后，
-预热 3 次，再采集 15 次独立 profiler 样本，每个样本执行一次算子。
-每次采样前执行缓存重置、1 GiB 缓存驱逐及同步。
-计时采用原始 CANN profiler 的设备执行区间，重叠区间只计算一次，不包含主机间隙。
+非 root 用户需要管理员先创建该卡的共享锁：
 
-### 判断运行是否有效并读取结果
+```bash
+python scripts/npu_guard.py init --device 3
+```
 
-先检查 `receipt.json`：只有 `status` 为 `passed`，且 `result.verify_only` 为 `false`，
-才能将此次运行作为性能结果。设备争用、锁频失败、正确性失败或运行期间源码变化都会使结果失效。
+只有 `receipt.json` 中 `status` 为 `passed`，且 `result.verify_only` 为 `false` 时，
+才是成功的性能运行。每个 case 的耗时位于 `results.jsonl` 的
+`implementations.tileops.measurement.latency_ms`，单位 ms，是 15 次采样的算术平均值。
+同时保留 `samples_ms`、`stdev_ms` 和 `profiles/`，比较优化前后的波动与耗时。
+开发测量标记为 `ascend-profiler-unlocked-v1`、`formal: false`，
+应在同卡同环境下比较，不与锁频正式测量混用。
 
-| 文件或字段 | 含义 |
-| --- | --- |
-| `receipt.json` | 整次运行的最终状态和设备保护退出码 |
-| `results.jsonl` | 每个 workload 一行，包含正确性和测量结果 |
-| `implementations.tileops.measurement.latency_ms` | 15 次设备执行区间耗时的算术平均值，单位 ms，主要比较指标 |
-| `implementations.tileops.measurement.samples_ms` | 全部 15 次原始耗时 |
-| `implementations.tileops.measurement.stdev_ms` | 样本标准差，用于观察波动 |
-| `environment.json` | 软件、设备及测量环境 |
-| `clock-readbacks.json` | 时钟读回记录 |
-| `profiles/` | 原始 profiler 数据，用于定位瓶颈 |
-| `run.log` | 编译、执行与报错日志 |
+### 原有正式测量
 
-`median_ms`、`min_ms`、`max_ms` 是辅助统计，正式比较使用 `latency_ms`，
-不要只挑选最快样本。保留结果目录及原始 profiler 数据，便于复查。
-
-### 比较优化版本
-
-先保存当前 Ascend 初版的测量结果，再逐项修改和复测。
-每次修改后先检查正确性，用新的结果目录运行相同命令，并记录源码版本和改动内容。
-测量期间不要修改源码。
+正式性能测量必须遵循
+[Ascend 开发说明](../../../../../docs/ascend950/development.md)
+规定的时钟配置、设备预约和测量协议。
 
 在相同输入与协议下比较以下选项：
 
@@ -142,19 +130,6 @@ python scripts/benchmark_ascend.py \
 
 报告全部 7 个 workload 的结果，尤其关注 `ds-v3-mixed` 的长短请求混合，
 以及非对齐起点触发逐行搬运的情况。
-
-建议按下面的格式记录每个规格：
-
-| workload | 初版平均耗时（ms） | 优化版平均耗时（ms） | 加速比 | 样本标准差（ms） |
-| --- | --- | --- | --- | --- |
-| `ds-v3-chunk-fp8` | 待测 | 待测 | 待测 | 待测 |
-| `ds-v3-mixed` | 待测 | 待测 | 待测 | 待测 |
-| `llama-70b-cp` | 待测 | 待测 | 待测 | 待测 |
-
-加速比为“初版平均耗时 / 优化版平均耗时”。初版与优化版应在同一台 Ascend 上，
-使用相同工具链、输入、锁频策略和测量协议。
-如果需要与其他 Ascend 实现比较，可以通过启动器的 `--implementation-factory module:function`
-接入符合仓库 `Implementation` 接口的基线适配器；CUDA 耗时仅作为跨硬件参考。
 
 ## 当前验证状态
 

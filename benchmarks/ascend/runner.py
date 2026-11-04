@@ -95,6 +95,8 @@ def main(argv=None):
     parser.add_argument("--case-regex")
     parser.add_argument("--clock-config", type=Path)
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--unlocked", action="store_true",
+                        help="development measurement without clock locking or fixed SKU")
     parser.add_argument("--include-reference", action="store_true")
     parser.add_argument(
         "--implementation-factory",
@@ -109,9 +111,11 @@ def main(argv=None):
 
     signal.signal(signal.SIGTERM, interrupted)
     reservation = require_reservation()
-    if not args.verify_only and args.clock_config is None:
+    if args.unlocked and args.clock_config is not None:
+        parser.error("--unlocked and --clock-config are mutually exclusive")
+    if not args.verify_only and not args.unlocked and args.clock_config is None:
         parser.error("formal benchmark requires --clock-config; no unlocked fallback")
-    if version("tilelang").split("+", 1)[0] != "0.1.15":
+    if not args.unlocked and version("tilelang").split("+", 1)[0] != "0.1.15":
         raise RuntimeError("This protocol requires the official TileLang 0.1.15 release")
     before = source_fingerprint()
     _write(args.run_dir / "sources.json", before)
@@ -130,7 +134,8 @@ def main(argv=None):
         raise RuntimeError(registry.LOAD_FAILURES)
     set_run_device("npu")
     device_name = torch.npu.get_device_name(0)
-    if "Ascend950" not in device_name:
+    properties = torch.npu.get_device_properties(0)
+    if not args.unlocked and "Ascend950" not in device_name:
         raise RuntimeError(f"This protocol requires Ascend 950, got {device_name}")
     manifest = load_manifest()
     supported = {op for op, kinds in registry.REGISTERED_KERNEL_TYPES.items() if "ascend" in kinds}
@@ -153,20 +158,27 @@ def main(argv=None):
         "cann_components": runtime_versions(torch_npu.utils.get_cann_version),
         "python": sys.version,
         "device": device_name,
+        "core_counts": {
+            "cube": getattr(properties, "cube_core_num", None),
+            "vector": getattr(properties, "vector_core_num", None),
+        },
         "reservation": reservation,
         "ops": selected,
         "verify_only": args.verify_only,
+        "formal": not args.verify_only and not args.unlocked,
+        "physical_device": reservation.get("device", 0),
         "clock_policy": json.loads(args.clock_config.read_text()) if args.clock_config else None,
     }
     _write(args.run_dir / "environment.json", metadata)
     from contextlib import nullcontext
 
-    from benchmarks.ascend.clocks import ClockPolicy
+    from benchmarks.ascend.clocks import ClockPolicy, UnlockedPolicy
     from benchmarks.ascend.timing import ProfilerTimer
 
     passed = failed = 0
     completed = False
-    clock_context = nullcontext() if args.verify_only else ClockPolicy(args.clock_config)
+    clock_context = (nullcontext() if args.verify_only else
+                     UnlockedPolicy() if args.unlocked else ClockPolicy(args.clock_config))
     try:
         with clock_context as clocks:
             timer = None if args.verify_only else ProfilerTimer(args.run_dir / "profiles", clocks)
@@ -239,6 +251,8 @@ def main(argv=None):
                 "failed": failed,
                 "source_changed": changed,
                 "verify_only": args.verify_only,
+                "formal": not args.verify_only and not args.unlocked,
+                "physical_device": reservation.get("device", 0),
             },
         )
     return 0 if completed and passed and not failed and not changed else 1
