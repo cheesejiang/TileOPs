@@ -87,7 +87,7 @@ Gather 带宽按读入 cache 和写出 dst 的逻辑字节量估算，不包含�
 python scripts/benchmark_ascend.py \
   --device 3 --unlocked \
   --owner gather/dev \
-  --run-dir "/shared/results/gather-dev-$(date +%Y%m%d-%H%M%S)" \
+  --run-dir "./shared/results/gather-dev-$(date +%Y%m%d-%H%M%S)" \
   --op PagedKVCacheGatherFwdOp
 ```
 
