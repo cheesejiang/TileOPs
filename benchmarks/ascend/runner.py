@@ -77,6 +77,9 @@ def benchmark_case(case, implementations, timer, *, name, verify_only=False):
     results = {}
     for tag, impl in implementations.items():
         result = {"correctness": dataclasses.asdict(checks[tag])}
+        provenance = getattr(impl.run, "provenance", None)
+        if provenance is not None:
+            result["provenance"] = provenance
         if not verify_only:
             args = case.inputs if impl.args is None else impl.args
             result["measurement"] = timer.measure(

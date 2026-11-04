@@ -71,6 +71,9 @@ python scripts/benchmark_ascend.py --owner gather/verify \
 
 ## 性能验证与调优
 
+使用 ops-nn GatherV2 对比 5 个非 FP8 规格，参见
+[GatherV2 基线准备、精度验证及性能测试](gather_v2_baseline_zh.md)。
+
 每次通过 `scripts/benchmark_ascend.py` 运行结束后，会在终端打印汇总表，
 并在本次 `--run-dir` 下保存 `summary.md`。
 表中包含算子、规格、实现、状态、平均耗时（μs）、标准差（μs）、
