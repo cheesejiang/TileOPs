@@ -43,6 +43,17 @@ class LauncherRoutingTest(unittest.TestCase):
                 self.assertEqual(command[-2:], ["--op", "all"])
                 self.assertIn(str(root / "src"), kwargs["env"]["PYTHONPATH"])
                 (run / "result.json").write_text(json.dumps({"status": "passed"}))
+                row = {
+                    "op": "PagedKVCacheGatherFwdOp", "case_id": "fp8-case",
+                    "status": "measured",
+                    "params": {"dst": [[1000, 576], "bfloat16"],
+                               "cache": [[16, 64, 576], "float8_e4m3fn"]},
+                    "implementations": {"tileops": {
+                        "correctness": {"max_abs_err": 0.0},
+                        "measurement": {"latency_ms": 0.01, "stdev_ms": 0.001,
+                                        "protocol": "ascend-profiler-unlocked-v1"}}},
+                }
+                (run / "results.jsonl").write_text(json.dumps(row) + "\n")
                 return SimpleNamespace(returncode=0)
 
             with (
@@ -53,6 +64,26 @@ class LauncherRoutingTest(unittest.TestCase):
             receipt = json.loads((run / "receipt.json").read_text())
             self.assertEqual(receipt["guard_exit_code"], 0)
             self.assertEqual(receipt["command"][1], str(guard))
+            report = (run / "summary.md").read_text()
+            self.assertIn("fp8-case | tileops | measured | 10.000 | 1.000 | 172.8 | 0.0", report)
+
+    def test_summary_handles_failed_and_verify_only_runs(self):
+        root = Path(__file__).resolve().parents[2]
+        spec = importlib.util.spec_from_file_location("ascend_report", root / "scripts/benchmark_ascend.py")
+        launcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(launcher)
+        with tempfile.TemporaryDirectory() as temp:
+            run = Path(temp)
+            rows = [{"op": "Gather", "case_id": "check", "status": "verified",
+                     "implementations": {"tileops": {"correctness": {"max_abs_err": 0}}}},
+                    {"op": "Gather", "case_id": "bad|case", "status": "failed"}]
+            (run / "results.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n{broken")
+            launcher.write_summary(run, {"status": "failed", "guard_exit_code": 1})
+            report = (run / "summary.md").read_text()
+            self.assertIn("不能作为有效性能结果", report)
+            self.assertIn("仅正确性", report)
+            self.assertIn("bad\\|case", report)
+            self.assertIn("无法解析", report)
 
 
 if __name__ == "__main__":

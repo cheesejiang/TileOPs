@@ -71,6 +71,14 @@ python scripts/benchmark_ascend.py --owner gather/verify \
 
 ## 性能验证与调优
 
+每次通过 `scripts/benchmark_ascend.py` 运行结束后，会在终端打印汇总表，
+并在本次 `--run-dir` 下保存 `summary.md`。
+表中包含算子、规格、实现、状态、平均耗时（μs）、标准差（μs）、
+估算有效带宽（GB/s）、最大绝对误差和测量协议。
+Gather 带宽按读入 cache 和写出 dst 的逻辑字节量估算，不包含元数据，
+不是硬件实测 HBM 带宽。仅正确性运行的耗时显示为 `—`。
+失败运行仍生成诊断表，但会明确标记性能结果无效；详细错误查看 `run.log` 和 `results.jsonl`。
+
 ### 多卡服务器上的开发测量（无需锁频或固定核数）
 
 在 `TileOPs` 根目录执行，下面以物理卡 3 为例：
