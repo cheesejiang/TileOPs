@@ -443,7 +443,16 @@ def _restore(tensors: list, snapshot: list) -> None:
 def _unchanged(tensors: list, snapshot: list) -> bool:
     try:
         for tensor, source in zip(tensors, snapshot, strict=True):
-            torch.testing.assert_close(tensor, source, rtol=0, atol=0, equal_nan=True)
+            if tensor.dtype == source.dtype == torch.float8_e4m3fn:
+                # NPU isclose does not implement FP8. Input preservation is a
+                # storage check: compare bytes, including signed zero/NaN bits.
+                torch.testing.assert_close(
+                    tensor.contiguous().view(torch.uint8),
+                    source.contiguous().view(torch.uint8),
+                    rtol=0, atol=0,
+                )
+            else:
+                torch.testing.assert_close(tensor, source, rtol=0, atol=0, equal_nan=True)
     except AssertionError:
         return False
     return True
