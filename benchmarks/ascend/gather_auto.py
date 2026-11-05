@@ -33,7 +33,7 @@ class AutoGather:
         if kernel is None:
             if self.group_tiles is not None:
                 from tileops.kernels.ascend.attention.paged_cache_gather_batch import AscendPagedKVCacheGatherBatchKernel
-                kernel = AscendPagedKVCacheGatherBatchKernel(call, group_tiles=self.group_tiles, double_buffer=self.double_buffer)
+                kernel = AscendPagedKVCacheGatherBatchKernel(call, group_tiles=self.group_tiles, double_buffer=self.double_buffer, tile_rows=self.tile_rows)
             else:
                 kernel = AscendPagedKVCacheGatherAutoKernel(
                     call, stages=self.stages, tile_rows=self.tile_rows, segmented=self.segmented)
@@ -83,6 +83,34 @@ def make_implementations(op_name, case):
         for group_tiles in (2, 4):
             run = _Run(case.inputs, stages=1, group_tiles=group_tiles)
             result[f"tilelang-batch{group_tiles}"] = Implementation(run, args=(), reset=run.reset)
-        run = _Run(case.inputs, stages=1, group_tiles=2, double_buffer=True)
-        result["tilelang-batch2-db"] = Implementation(run, args=(), reset=run.reset)
+        for group_tiles in (2, 4):
+            run = _Run(case.inputs, stages=1, group_tiles=group_tiles, double_buffer=True)
+            result[f"tilelang-batch{group_tiles}-db"] = Implementation(run, args=(), reset=run.reset)
+        run = _Run(case.inputs, stages=1, group_tiles=16, tile_rows=4)
+        result["tilelang-batch16-r4"] = Implementation(run, args=(), reset=run.reset)
+    return result
+
+
+def make_batch4_implementations(op_name, case):
+    """Focused comparison without compiling unrelated experimental schedules."""
+    if op_name != "PagedKVCacheGatherFwdOp" or case.inputs[1].dtype not in (torch.float16, torch.bfloat16):
+        return {}
+    result = {}
+    for double_buffer in (False, True):
+        run = _Run(case.inputs, stages=1, group_tiles=4, double_buffer=double_buffer)
+        name = "tilelang-batch4-db" if double_buffer else "tilelang-batch4"
+        result[name] = Implementation(run, args=(), reset=run.reset)
+    return result
+
+
+def make_load_granularity_implementations(op_name, case):
+    """Single-buffer 64-row groups: compare four 16-row and sixteen 4-row loads."""
+    if op_name != "PagedKVCacheGatherFwdOp" or case.inputs[1].dtype not in (torch.float16, torch.bfloat16):
+        return {}
+    result = {}
+    for group_tiles, tile_rows, name in (
+        (4, 16, "tilelang-batch4"), (16, 4, "tilelang-batch16-r4"),
+    ):
+        run = _Run(case.inputs, stages=1, group_tiles=group_tiles, tile_rows=tile_rows)
+        result[name] = Implementation(run, args=(), reset=run.reset)
     return result

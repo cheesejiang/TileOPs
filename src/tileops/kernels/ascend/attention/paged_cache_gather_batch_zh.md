@@ -61,7 +61,7 @@ scripts/profile_gather_pipeline_README.md。传入 `--source-dir` 可导出生�
 第一组只读入；从第二组开始读当前组、写上一组；只有最后一组可能不足完整组。
 没有任务的核不参与组事件。事件 ID 按缓冲固定为 0/1，不使用动态事件编号。
 地址计算仍有标量/页表依赖，因此实际重叠和收益须通过生成代码、流水及实机确认。
-当前不提供 batch4 双缓冲，避免其 256 KiB payload 再加元数据造成容量问题。
+batch4 交替区域候选现已提供，见下节；其 256 KiB payload 加元数据需要设备编译验证容量。
 
 原正确性命令已同时覆盖单缓冲和双缓冲。流水采集可使用：
 
@@ -81,3 +81,58 @@ python scripts/profile_gather_pipeline.py \
 
 不指定时显示全部。该参数只过滤展示，不改变实际执行、正确性验证或原始
 `results.jsonl`，receipt 仍表示整次运行的状态。
+
+
+## batch4 使用两个交替区域
+
+新增 `tilelang-batch4-db`，每组仍为 64 行、每次读入仍为 16 行。
+只改变 UB 区域数量和组间同步，不同时改变读入粒度。
+同一 UB 分配具有 `[2, 64, row_width]` 布局：组 0/2/4 使用 A，
+组 1/3/5 使用 B。发出组 n 读入后，写出组 n-1；复用 A/B 前分别等待
+该区域的上次写出完成。组内四次读入之间没有额外的完成等待。
+这沿用 batch2-db 的按区域事件协议，不是另一种新的调度算法。
+
+BF16、row_width=1024 时仅 payload 就占 256 KiB，还需要元数据和描述符。
+如果超出实际 UB 容量，设备编译会失败；不能删除复用等待来绕过容量限制。
+本地没有完成设备编译，不能保证该配置在当前机器可用。
+
+只加载 batch4 两个候选（公共 tileops 仍由 runner 加入），并仅展示两者：
+
+```bash
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/batch4 \
+  --run-dir "./benchmark-results/batch4-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --implementation-factory benchmarks.ascend.gather_auto:make_batch4_implementations \
+  --summary-implementations tilelang-batch4 tilelang-batch4-db
+```
+
+先追加 `--verify-only` 验证，再去掉该参数测性能。FP8 不生成这两个候选。
+流水脚本选择 `--implementation batch4-db`；`--source-dir` 可导出代码，
+对比事件 0/1 是否分别约束两个 UB 区域。
+
+## 单缓冲：16 次 × 4 行读入
+
+新增 `tilelang-batch16-r4`：`group_tiles=16, tile_rows=4, double_buffer=False`。
+每组仍为 64 行，BF16、行宽 1024 时 payload UB 仍为 128 KiB。
+与 batch4 的区别只有读入上限从 16 行变为 4 行：对齐完整组由
+4 次 × 32 KiB 变成 16 次 × 8 KiB，最后仍统一写出 128 KiB。
+跨页/请求时可能进一步拆分，因此不是所有输入都恰好 16 次读入。
+每核区间仍按 16 行划分，与原 batch4 保持一致，避免改变任务分配干扰比较。
+组间仍串行：写出完成后复用同一段 UB，不采用两个交替区域。
+
+下面命令只加载这两个单缓冲候选；公共 tileops 仍执行，但不显示在汇总中。
+不会加载 batch4-db 等其他实验候选。
+
+```bash
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/load-granularity \
+  --run-dir "./benchmark-results/load-granularity-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --implementation-factory benchmarks.ascend.gather_auto:make_load_granularity_implementations \
+  --summary-implementations tilelang-batch4 tilelang-batch16-r4
+```
+
+先追加 `--verify-only` 验证；正确性 pytest 也已加入该配置。
+流水采集选择 `--implementation batch16-r4`。
+本地已做 Python 语法和 diff 检查；NPU 编译、精度和性能尚待设备验证。

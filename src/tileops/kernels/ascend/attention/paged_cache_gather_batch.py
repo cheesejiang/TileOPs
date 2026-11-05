@@ -16,8 +16,7 @@ from tileops.kernels.kernel_base import Kernel
 
 
 @functools.lru_cache(maxsize=64)
-def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks, group_tiles, double_buffer):
-    tile_rows = 16
+def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks, group_tiles, double_buffer, tile_rows):
     group_rows = tile_rows * group_tiles
     buffers = 2 if double_buffer else 1
     total = T.dynamic("total")
@@ -32,6 +31,8 @@ def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks,
         scale: T.Tensor((pages * page_size, width), dtype),
     ):
         with T.Kernel(blocks) as bx:
+            # A single allocation split into disjoint per-group UB regions.
+            # batch4: A=rows 0..63, B=rows 64..127 (flattened).
             src = T.alloc_shared((buffers, group_rows, width), dtype)
             offsets = T.alloc_shared((batch + 1,), "int32")
             beginnings = T.alloc_shared((batch,), "int32")
@@ -46,9 +47,9 @@ def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks,
             T.ascend_set_flag("MTE2_S", 0)
             T.ascend_wait_flag("MTE2_S", 0)
             # Partition contiguous tile intervals across cores, including tails.
-            tiles_per_core = T.ceildiv(T.ceildiv(total, tile_rows), blocks)
-            first = bx * tiles_per_core * tile_rows
-            end = T.min(total, (bx + 1) * tiles_per_core * tile_rows)
+            tiles_per_core = T.ceildiv(T.ceildiv(total, 16), blocks)
+            first = bx * tiles_per_core * 16
+            end = T.min(total, (bx + 1) * tiles_per_core * 16)
             request = T.alloc_var("int32", init=0)
             lo = T.alloc_var("int32", init=0)
             hi = T.alloc_var("int32", init=batch)
@@ -151,19 +152,19 @@ def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks,
 class AscendPagedKVCacheGatherBatchKernel(AscendPagedKVCacheGatherKernel):
     """Inherit the public launch checks; replace only the compiled schedule."""
 
-    def __init__(self, call, group_tiles=2, double_buffer=False):
+    def __init__(self, call, group_tiles=2, double_buffer=False, tile_rows=16):
         reason = self.refusal(call)
         if reason:
             raise ValueError(reason)
         if call.dtype not in (torch.float16, torch.bfloat16) or call.out_dtype != call.dtype:
             raise ValueError("batched gather requires matching FP16/BF16 cache and output")
-        if group_tiles not in (2, 4):
-            raise ValueError("group_tiles must be 2 or 4")
-        if double_buffer and group_tiles != 2:
-            raise ValueError("double buffering currently supports group_tiles=2 only")
+        if (group_tiles, tile_rows) not in ((2, 16), (4, 16), (16, 4)):
+            raise ValueError("supported (group_tiles, tile_rows): (2,16), (4,16), (16,4)")
+        if group_tiles == 16 and double_buffer:
+            raise ValueError("16x4 candidate uses a single buffer")
         Kernel.__init__(self, device_index=call.device.index if call.device is not None else None)
         self.call, self.dtype = call, call.dtype
         self._compiled = _compile(
             call.batch, call.num_pages, call.page_size, call.table_width, call.row_width,
-            self.dtype_str, call.has_starts, _vector_cores(self.device_index), group_tiles, double_buffer,
+            self.dtype_str, call.has_starts, _vector_cores(self.device_index), group_tiles, double_buffer, tile_rows,
         )
