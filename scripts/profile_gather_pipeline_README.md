@@ -76,7 +76,6 @@ GATHER_AUTO_KERNEL=实际的auto2内核名称
 
 msopprof simulator \
   --output "./pipeline-results/auto2-$(date +%Y%m%d-%H%M%S)" \
-  --soc-version Ascend950 \
   --aic-metrics PipeUtilization \
   --kernel-name "$GATHER_AUTO_KERNEL" \
   --launch-count 1 \
@@ -94,7 +93,6 @@ GATHER_MANUAL_KERNEL=实际的manual内核名称
 
 msopprof simulator \
   --output "./pipeline-results/manual-$(date +%Y%m%d-%H%M%S)" \
-  --soc-version Ascend950 \
   --aic-metrics PipeUtilization \
   --kernel-name "$GATHER_MANUAL_KERNEL" \
   --launch-count 1 \
@@ -117,7 +115,6 @@ GATHER_CANN_KERNEL=GatherV2_4c62aa93d3ed2b471b7de5c999eaf660_high_precision_1000
 
 msopprof simulator \
   --output "./pipeline-results/gatherv2-core-$(date +%Y%m%d-%H%M%S)" \
-  --soc-version Ascend950 \
   --aic-metrics PipeUtilization \
   --kernel-name "$GATHER_CANN_KERNEL" \
   --launch-count 1 \
