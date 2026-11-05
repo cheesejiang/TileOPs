@@ -89,11 +89,12 @@ msopprof simulator \
 
 ## 采集 GatherV2 core
 
-先沿用此前测试成功的动态库设置，以下均为路径示例：
+先沿用此前测试使用的 CANN 已安装版本动态库设置。
+此前提供的完整路径如下，在该服务器上使用前确认文件存在：
 
 ```bash
-export OPS_NN_OPAPI_LIBRARY=/实际路径/libopapi_nn.so
-export OPS_NN_TENSOR_LIBRARY=/实际路径/libnnopbase.so
+export OPS_NN_OPAPI_LIBRARY=/home/CANN/9.3.0.weekly.20260916/cann-9.3.0/x86_64-linux/lib64/libopapi_nn.so
+export OPS_NN_TENSOR_LIBRARY=/home/CANN/9.3.0.weekly.20260916/cann-9.3.0/x86_64-linux/lib64/libnnopbase.so
 GATHER_CANN_KERNEL=实际的GatherV2内核名称
 
 msopprof simulator \
@@ -109,6 +110,9 @@ msopprof simulator \
 ```
 
 CANN 版本不提供源码导出，因此不要传 `--source-dir`。
+注意：上述 op-api 路径在 `cann-9.3.0/` 下，此前查到的 simulator 路径在
+`cann/x86_64-linux/simulator/` 下。不要直接将两者互换；先核对安装关系和版本兼容性。
+要确认某次成功测量实际加载的库，以其 `results.jsonl` 中的 `provenance.library` 为准。
 core 不计入物理索引生成，仅作为搬运路径参考；它和 TileLang 完整流程的工作范围不同。
 
 ## 参数和结果
