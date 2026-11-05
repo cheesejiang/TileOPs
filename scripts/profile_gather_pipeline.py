@@ -6,6 +6,8 @@ CPU result validation are setup work, not an isolated timing protocol.
 """
 
 import argparse
+import csv
+import json
 import sys
 from pathlib import Path
 
@@ -14,6 +16,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--implementation", choices=("manual", "auto2", "gatherv2-core"), required=True)
     parser.add_argument("--source-dir", type=Path)
+    parser.add_argument("--profile-dir", type=Path,
+                        help="real-device profiler with automatic analysis; omit for simulator runs")
     parser.add_argument("--check", action="store_true", help="compare the result to a CPU reference")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -46,8 +50,10 @@ def main():
         kernel = GatherV2()
         if args.source_dir:
             raise ValueError("CANN library source is not available from the Python adapter")
-        torch.npu.synchronize()
-        kernel(cache.flatten(0, 1), slots, dst)
+        flat_cache = cache.flatten(0, 1)
+
+        def launch():
+            kernel(flat_cache, slots, dst)
     else:
         call = PagedKVCacheGatherCall(
             batch=batch, num_pages=pages, page_size=ps, table_width=table_width,
@@ -60,13 +66,45 @@ def main():
             args.source_dir.mkdir(parents=True, exist_ok=True)
             (args.source_dir / f"{args.implementation}.cpp").write_text(
                 kernel._compiled.get_kernel_source(), encoding="utf-8")
+        def launch():
+            kernel(dst, cache, table, cu, starts)
+
+    torch.npu.synchronize()
+    if args.profile_dir:
+        report = args.profile_dir.resolve()
+        report.mkdir(parents=True, exist_ok=False)
+        # Warm up outside the window, including the ACLNN first-call setup.
+        launch()
         torch.npu.synchronize()
-        kernel(dst, cache, table, cu, starts)
+        print(f"Collecting real-device profile into {report}", flush=True)
+        with torch_npu.profiler.profile(
+            activities=[torch_npu.profiler.ProfilerActivity.CPU,
+                        torch_npu.profiler.ProfilerActivity.NPU],
+            on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
+                str(report), analyse_flag=True),
+        ) as prof:
+            launch()
+            torch.npu.synchronize()
+            prof.step()
+        print(f"Profiler raw directory: {prof.prof_if.prof_path}", flush=True)
+        print("Generated reports:", flush=True)
+        for path in sorted(report.rglob("*")):
+            if path.is_file() and path.suffix in (".csv", ".json", ".db"):
+                print(path, flush=True)
+                if "op_summary" in path.name.lower() and path.suffix == ".csv":
+                    with path.open(encoding="utf-8-sig", newline="") as handle:
+                        for row_data in csv.DictReader(handle):
+                            names = {k: v for k, v in row_data.items()
+                                     if "name" in k.lower() or "type" in k.lower()}
+                            print(json.dumps(names, ensure_ascii=False), flush=True)
+        print("If no operator report was generated, retain the raw directory and analysis warnings.", flush=True)
+    else:
+        launch()
     torch.npu.synchronize()
     if args.check:
         expected = cache_cpu[slots_cpu].view(batch * length, 8, 128)
         torch.testing.assert_close(dst.cpu(), expected, rtol=0, atol=0)
-    print(f"Completed one {args.implementation} call; this script does not report benchmark latency.")
+    print(f"Completed {args.implementation}; this script does not report benchmark latency.")
 
 
 if __name__ == "__main__":

@@ -29,6 +29,24 @@ dst `[32768,8,128]`，8 个请求各读 4096 行，逻辑起点均为 2048。
 
 ## 先确定实际内核名
 
+推荐直接复用相同输入采集一次实机 profiler，并自动解析。
+使用已配置的 GatherV2 动态库环境，在站点支持的按卡保护程序下执行：
+
+```bash
+python scripts/npu_guard.py run --device 3 --owner gather/kernel-name -- \
+  python scripts/profile_gather_pipeline.py \
+    --implementation gatherv2-core \
+    --profile-dir "./pipeline-results/kernel-name-$(date +%Y%m%d-%H%M%S)" \
+    --check
+```
+
+无需修改物理/逻辑卡号：guard 将所选物理卡映射为子进程的逻辑 npu:0。
+profile-dir 必须是新目录。脚本在采样外预热一次，再只采集一次目标调用，
+启用自动解析并打印原始采样位置、生成的 CSV/JSON/DB 路径及 op_summary 名称列。
+如无 op_summary，请保留终端的分析警告和打印出的原始目录，不要默认认为名称为空。
+可将 implementation 换成 manual 或 auto2，对它们同样采集实际名称。
+`--profile-dir` 仅用于实机名称查询，运行 msopprof simulator 时不要传该参数，避免嵌套 profiler。
+
 TileLang 两种实现可以在正常 NPU 环境运行并导出代码：
 
 ```bash
