@@ -113,7 +113,7 @@ msopprof simulator \
 ```bash
 export OPS_NN_OPAPI_LIBRARY=/home/CANN/9.3.0.weekly.20260916/cann-9.3.0/x86_64-linux/lib64/libopapi_nn.so
 export OPS_NN_TENSOR_LIBRARY=/home/CANN/9.3.0.weekly.20260916/cann-9.3.0/x86_64-linux/lib64/libnnopbase.so
-GATHER_CANN_KERNEL=实际的GatherV2内核名称
+GATHER_CANN_KERNEL=GatherV2_4c62aa93d3ed2b471b7de5c999eaf660_high_precision_1000000299
 
 msopprof simulator \
   --output "./pipeline-results/gatherv2-core-$(date +%Y%m%d-%H%M%S)" \
@@ -128,6 +128,27 @@ msopprof simulator \
 ```
 
 CANN 版本不提供源码导出，因此不要传 `--source-dir`。
+实机报告的上层任务名称如下，它与 simulator 用于筛选的设备符号不同：
+
+```text
+Device_id: 3
+Name: aclnnGatherV2_GatherV2AiCore_GatherV2
+Duration(us): 45.115
+Block Num: 56
+```
+
+45.115 μs 是单次调用的记录，不替代 benchmark 的 15 次平均耗时。
+Block Num 是启动块数，不等于设备物理核总数。
+本次 simulator 实际输出：
+
+```text
+Kernel GatherV2_4c62aa93d3ed2b471b7de5c999eaf660_high_precision_1000000299 skipped: not selected via --kernel-name
+```
+
+因此上面的采集命令已改为该实际设备符号；不要用实机报告中的
+`aclnnGatherV2_GatherV2AiCore_GatherV2` 作为本次 simulator 的筛选名称。
+如果日志显示所有内核被过滤，不能将“应用执行成功”当作“已采集到流水”。
+不同 CANN 版本、二进制或输入配置可能改变哈希及 tiling 后缀；届时以日志中的实际名称为准。
 注意：上述 op-api 路径在 `cann-9.3.0/` 下，此前查到的 simulator 路径在
 `cann/x86_64-linux/simulator/` 下。不要直接将两者互换；先核对安装关系和版本兼容性。
 要确认某次成功测量实际加载的库，以其 `results.jsonl` 中的 `provenance.library` 为准。
