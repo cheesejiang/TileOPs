@@ -42,10 +42,13 @@ def _library():
 
 def physical_slots(table, cu, starts, rows, page_size):
     """Resolve live device metadata; no tolist/item or host metadata staging."""
+    # 根据累积长度，找到这行属于哪个请求
     request = torch.searchsorted(cu[1:].contiguous(), rows, right=True)
+    # 求该请求内部的逻辑读取位置
     pos = rows - cu[request].to(torch.int64)
     if starts is not None:
         pos = pos + starts[request].to(torch.int64)
+    # 查页表，得到物理行号
     page_index = request * table.shape[1] + torch.div(pos, page_size, rounding_mode="floor")
     page = table.reshape(-1)[page_index].to(torch.int64)
     return (page * page_size + pos.remainder(page_size)).contiguous()
