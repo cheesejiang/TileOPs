@@ -12,7 +12,8 @@ from tileops.kernels.attention.paged_cache_gather import PagedKVCacheGatherCall
 class AutoGather:
     """Public-layout adapter; compile on first use, including strided-output staging."""
 
-    def __init__(self, stages=1, tile_rows=16, segmented=False):
+    def __init__(self, stages=1, tile_rows=16, segmented=False, group_tiles=None):
+        self.group_tiles = group_tiles
         self.stages = stages
         self.tile_rows = tile_rows
         self.segmented = segmented
@@ -29,8 +30,12 @@ class AutoGather:
         )
         kernel = self.kernels.get(call)
         if kernel is None:
-            kernel = AscendPagedKVCacheGatherAutoKernel(
-                call, stages=self.stages, tile_rows=self.tile_rows, segmented=self.segmented)
+            if self.group_tiles is not None:
+                from tileops.kernels.ascend.attention.paged_cache_gather_batch import AscendPagedKVCacheGatherBatchKernel
+                kernel = AscendPagedKVCacheGatherBatchKernel(call, group_tiles=self.group_tiles)
+            else:
+                kernel = AscendPagedKVCacheGatherAutoKernel(
+                    call, stages=self.stages, tile_rows=self.tile_rows, segmented=self.segmented)
             self.kernels[call] = kernel
         output = dst if dst.is_contiguous() else torch.empty_like(dst, memory_format=torch.contiguous_format)
         kernel(output, cache, table.contiguous(), cu.contiguous(),
@@ -42,14 +47,15 @@ class AutoGather:
 
 
 class _Run:
-    def __init__(self, inputs, stages, tile_rows=16, segmented=False):
+    def __init__(self, inputs, stages, tile_rows=16, segmented=False, group_tiles=None):
         self.dst = torch.empty_like(inputs[0])
         self.inputs = inputs[1:]
-        self.op = AutoGather(stages, tile_rows, segmented)
-        self.provenance = {"schedule": "automatic", "stages": stages,
+        self.op = AutoGather(stages, tile_rows, segmented, group_tiles)
+        self.provenance = {"schedule": "batched" if group_tiles else "automatic", "stages": stages,
+                           "group_tiles": group_tiles,
                            "tile_rows": tile_rows,
                            "segmented": segmented,
-                           "experimental": True, "explicit_events": False}
+                           "experimental": True, "explicit_events": group_tiles is not None}
 
     def __call__(self):
         self.op(self.dst, *self.inputs)
@@ -72,4 +78,8 @@ def make_implementations(op_name, case):
         result["tilelang-auto2-r32"] = Implementation(run, args=(), reset=run.reset)
     run = _Run(case.inputs, stages=2, tile_rows=16, segmented=True)
     result["tilelang-auto2-segments"] = Implementation(run, args=(), reset=run.reset)
+    if case.inputs[1].dtype in (torch.float16, torch.bfloat16):
+        for group_tiles in (2, 4):
+            run = _Run(case.inputs, stages=1, group_tiles=group_tiles)
+            result[f"tilelang-batch{group_tiles}"] = Implementation(run, args=(), reset=run.reset)
     return result

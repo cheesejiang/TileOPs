@@ -14,7 +14,7 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--implementation", choices=("manual", "auto2", "gatherv2-core"), required=True)
+    parser.add_argument("--implementation", choices=("manual", "auto2", "batch2", "batch4", "gatherv2-core"), required=True)
     parser.add_argument("--source-dir", type=Path)
     parser.add_argument("--profile-dir", type=Path,
                         help="real-device profiler with automatic analysis; omit for simulator runs")
@@ -60,7 +60,11 @@ def main():
             row_width=width, dtype=torch.bfloat16, out_dtype=torch.bfloat16,
             has_starts=True, device=device,
         )
-        kernel = (AscendPagedKVCacheGatherKernel(call) if args.implementation == "manual"
+        if args.implementation in ("batch2", "batch4"):
+            from tileops.kernels.ascend.attention.paged_cache_gather_batch import AscendPagedKVCacheGatherBatchKernel
+            kernel = AscendPagedKVCacheGatherBatchKernel(call, group_tiles=int(args.implementation[-1]))
+        else:
+            kernel = (AscendPagedKVCacheGatherKernel(call) if args.implementation == "manual"
                   else AscendPagedKVCacheGatherAutoKernel(call, stages=2, tile_rows=16))
         if args.source_dir:
             args.source_dir.mkdir(parents=True, exist_ok=True)

@@ -72,7 +72,7 @@ python scripts/profile_gather_pipeline.py \
 先将下面变量替换成上一步核对的实际名称：
 
 ```bash
-GATHER_AUTO_KERNEL=实际的auto2内核名称
+GATHER_AUTO_KERNEL=main_kernel
 
 msopprof simulator \
   --output "./pipeline-results/auto2-$(date +%Y%m%d-%H%M%S)" \
@@ -89,7 +89,7 @@ msopprof simulator \
 ## 采集手工版本
 
 ```bash
-GATHER_MANUAL_KERNEL=实际的manual内核名称
+GATHER_MANUAL_KERNEL=main_kernel
 
 msopprof simulator \
   --output "./pipeline-results/manual-$(date +%Y%m%d-%H%M%S)" \
