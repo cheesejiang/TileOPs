@@ -17,7 +17,7 @@ from tileops.kernels.kernel_base import Kernel
 
 
 @functools.lru_cache(maxsize=64)
-def _compile(batch, pages, page_size, table_width, width, dtype, out_dtype, starts, blocks, stages=1, tile_rows=16):
+def _compile(batch, pages, page_size, table_width, width, dtype, out_dtype, starts, blocks, stages=1, tile_rows=16, segmented=False):
     quantized = dtype == "float8_e4m3fn"
     total = T.dynamic("total")
 
@@ -66,6 +66,26 @@ def _compile(batch, pages, page_size, table_width, width, dtype, out_dtype, star
                     if row + tile_rows <= offsets[request + 1] and pos % page_size + tile_rows <= page_size:
                         physical = T.cast(table[request, pos // page_size], "int64") * page_size + pos % page_size
                         T.copy(cache[physical:physical + tile_rows, :], src)
+                    elif segmented:
+                        # One rectangular load per maximal page/request segment.
+                        # The final output tile may contain fewer than tile_rows rows.
+                        copied = T.alloc_var("int32", init=0)
+                        valid = T.min(tile_rows, total - row)
+                        while copied < valid:
+                            while offsets[request + 1] <= row + copied:
+                                request = request + 1
+                            p = row + copied - offsets[request]
+                            if starts:
+                                p = p + beginnings[request]
+                            count = T.min(
+                                valid - copied,
+                                T.min(offsets[request + 1] - row - copied,
+                                      page_size - p % page_size),
+                            )
+                            physical = T.cast(table[request, p // page_size], "int64") * page_size + p % page_size
+                            T.copy(cache[physical:physical + count, :],
+                                   src[copied:copied + count, :])
+                            copied = copied + count
                     else:
                         # Unaligned starts and request/page tails are uncommon;
                         # load each valid row, leaving all full tiles coalesced.
@@ -102,7 +122,7 @@ def _compile(batch, pages, page_size, table_width, width, dtype, out_dtype, star
 class AscendPagedKVCacheGatherAutoKernel(AscendPagedKVCacheGatherKernel):
     """Reuse manual host validation and launch contract, replace compilation only."""
 
-    def __init__(self, call, stages=1, tile_rows=16):
+    def __init__(self, call, stages=1, tile_rows=16, segmented=False):
         if stages not in (1, 2):
             raise ValueError("automatic gather supports stages=1 or 2")
         reason = self.refusal(call)
@@ -115,5 +135,5 @@ class AscendPagedKVCacheGatherAutoKernel(AscendPagedKVCacheGatherKernel):
         self._compiled = _compile(
             call.batch, call.num_pages, call.page_size, call.table_width, call.row_width,
             self.dtype_str, self.dtype_to_str(call.out_dtype), call.has_starts,
-            _vector_cores(self.device_index), stages, tile_rows,
+            _vector_cores(self.device_index), stages, tile_rows, segmented,
         )

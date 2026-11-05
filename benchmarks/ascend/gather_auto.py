@@ -12,9 +12,10 @@ from tileops.kernels.attention.paged_cache_gather import PagedKVCacheGatherCall
 class AutoGather:
     """Public-layout adapter; compile on first use, including strided-output staging."""
 
-    def __init__(self, stages=1, tile_rows=16):
+    def __init__(self, stages=1, tile_rows=16, segmented=False):
         self.stages = stages
         self.tile_rows = tile_rows
+        self.segmented = segmented
         self.kernels = {}
 
     def __call__(self, dst, cache, table, cu, starts=None, scale=None):
@@ -28,7 +29,8 @@ class AutoGather:
         )
         kernel = self.kernels.get(call)
         if kernel is None:
-            kernel = AscendPagedKVCacheGatherAutoKernel(call, stages=self.stages, tile_rows=self.tile_rows)
+            kernel = AscendPagedKVCacheGatherAutoKernel(
+                call, stages=self.stages, tile_rows=self.tile_rows, segmented=self.segmented)
             self.kernels[call] = kernel
         output = dst if dst.is_contiguous() else torch.empty_like(dst, memory_format=torch.contiguous_format)
         kernel(output, cache, table.contiguous(), cu.contiguous(),
@@ -40,12 +42,13 @@ class AutoGather:
 
 
 class _Run:
-    def __init__(self, inputs, stages, tile_rows=16):
+    def __init__(self, inputs, stages, tile_rows=16, segmented=False):
         self.dst = torch.empty_like(inputs[0])
         self.inputs = inputs[1:]
-        self.op = AutoGather(stages, tile_rows)
+        self.op = AutoGather(stages, tile_rows, segmented)
         self.provenance = {"schedule": "automatic", "stages": stages,
                            "tile_rows": tile_rows,
+                           "segmented": segmented,
                            "experimental": True, "explicit_events": False}
 
     def __call__(self):
@@ -67,4 +70,6 @@ def make_implementations(op_name, case):
     if case.inputs[1].shape[1] >= 32:
         run = _Run(case.inputs, stages=2, tile_rows=32)
         result["tilelang-auto2-r32"] = Implementation(run, args=(), reset=run.reset)
+    run = _Run(case.inputs, stages=2, tile_rows=16, segmented=True)
+    result["tilelang-auto2-segments"] = Implementation(run, args=(), reset=run.reset)
     return result
