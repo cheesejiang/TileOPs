@@ -17,9 +17,7 @@ from tileops.kernels.kernel_base import Kernel
 
 
 @functools.lru_cache(maxsize=64)
-def _compile(batch, pages, page_size, table_width, width, dtype, out_dtype, starts, blocks, stages=1):
-    # Keep tile geometry identical so stage-count comparisons isolate pipelining.
-    tile_rows = 16
+def _compile(batch, pages, page_size, table_width, width, dtype, out_dtype, starts, blocks, stages=1, tile_rows=16):
     quantized = dtype == "float8_e4m3fn"
     total = T.dynamic("total")
 
@@ -104,16 +102,18 @@ def _compile(batch, pages, page_size, table_width, width, dtype, out_dtype, star
 class AscendPagedKVCacheGatherAutoKernel(AscendPagedKVCacheGatherKernel):
     """Reuse manual host validation and launch contract, replace compilation only."""
 
-    def __init__(self, call, stages=1):
+    def __init__(self, call, stages=1, tile_rows=16):
         if stages not in (1, 2):
             raise ValueError("automatic gather supports stages=1 or 2")
         reason = self.refusal(call)
         if reason:
             raise ValueError(reason)
+        if tile_rows not in (16, 32) or tile_rows > call.page_size:
+            raise ValueError("tile_rows must be 16/32 and no larger than page_size")
         Kernel.__init__(self, device_index=call.device.index if call.device is not None else None)
         self.call, self.dtype = call, call.dtype
         self._compiled = _compile(
             call.batch, call.num_pages, call.page_size, call.table_width, call.row_width,
             self.dtype_str, self.dtype_to_str(call.out_dtype), call.has_starts,
-            _vector_cores(self.device_index), stages,
+            _vector_cores(self.device_index), stages, tile_rows,
         )

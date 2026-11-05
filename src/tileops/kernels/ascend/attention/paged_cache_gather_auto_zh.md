@@ -1,5 +1,11 @@
 # 分页 Gather 自动调度实验版本
 
+新增 32 行双缓冲候选 `tilelang-auto2-r32`，仅用于页大小为 64 的规格。
+原有 `tilelang-auto1` / `tilelang-auto2` 均保留 16 行，便于在同次运行中对照。
+新候选仍包含非对齐起点和输出尾部保护，需独立通过精度测试。
+32 行、576 宽的 FP8 双缓冲输入和输出逻辑数据量合计约 108 KiB，
+另有元数据和编译器临时空间，实际 UB 占用以生成代码为准。
+
 设备实现：`paged_cache_gather_auto.py`。
 对比适配器：`benchmarks/ascend/gather_auto.py`。
 默认注册的手工内核 `paged_cache_gather.py` 保持不变。
@@ -42,7 +48,8 @@ python scripts/benchmark_ascend.py \
 ```
 
 通过后去掉 `--verify-only`，改用新的目录和 owner 进行性能测试。
-summary.md 每个规格会输出 `tileops`（手工）、`tilelang-auto1`、`tilelang-auto2` 三行。
+summary.md 每个规格会输出 `tileops`（手工）、`tilelang-auto1`、`tilelang-auto2`，
+页大小为 64 时再增加 `tilelang-auto2-r32`。
 所有候选都通过同一参考实现精确检查，不静默回退到手工内核。
 
 本机缺少可导入的 `tilelang.ascend`、torch_npu 与 CANN，尚未实机编译或测量。
