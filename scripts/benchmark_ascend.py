@@ -84,6 +84,8 @@ def main():
     parser.add_argument(
         "--run-dir", type=Path, required=True, help="new directory; existing output is never reused"
     )
+    parser.add_argument("--implementations", nargs="+", metavar="NAME",
+                        help="run and report only the selected implementations")
     parser.add_argument("--summary-implementations", nargs="+", metavar="NAME",
                         help="implementation names to display in summary.md; raw results stay complete")
     parser.add_argument("--owner", required=True)
@@ -125,6 +127,7 @@ def main():
         "--run-dir",
         str(run),
         *rest,
+        *(["--implementations", *args.implementations] if args.implementations else []),
     ]
     started = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with (run / "run.log").open("x") as log:
@@ -142,7 +145,7 @@ def main():
     }
     (run / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps({"run_dir": str(run), **receipt}, indent=2))
-    write_summary(run, receipt, args.summary_implementations)
+    write_summary(run, receipt, args.summary_implementations or args.implementations)
     return 0 if success else (result.returncode or 1)
 
 

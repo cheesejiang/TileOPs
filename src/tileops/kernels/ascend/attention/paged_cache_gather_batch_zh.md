@@ -121,18 +121,88 @@ python scripts/benchmark_ascend.py \
 每核区间仍按 16 行划分，与原 batch4 保持一致，避免改变任务分配干扰比较。
 组间仍串行：写出完成后复用同一段 UB，不采用两个交替区域。
 
-下面命令只加载这两个单缓冲候选；公共 tileops 仍执行，但不显示在汇总中。
-不会加载 batch4-db 等其他实验候选。
+下面命令只运行这两个单缓冲候选的正确性和性能测试，并只汇总两者。
+不实例化或执行公共 tileops，不运行其他实验候选。独立的数值参考校验仍保留。
 
 ```bash
 python scripts/benchmark_ascend.py \
   --device 3 --unlocked --owner gather/load-granularity \
   --run-dir "./benchmark-results/load-granularity-$(date +%Y%m%d-%H%M%S)" \
   --op PagedKVCacheGatherFwdOp \
+  --case-regex "^(ds-v3-mixed|llama-70b-cp|mla-small|llama-cp-unaligned|mla-b256)-" \
   --implementation-factory benchmarks.ascend.gather_auto:make_load_granularity_implementations \
-  --summary-implementations tilelang-batch4 tilelang-batch16-r4
+  --implementations tilelang-batch4 tilelang-batch16-r4
 ```
 
 先追加 `--verify-only` 验证；正确性 pytest 也已加入该配置。
 流水采集选择 `--implementation batch16-r4`。
 本地已做 Python 语法和 diff 检查；NPU 编译、精度和性能尚待设备验证。
+
+`--implementations` 同时筛选执行和汇总；`--summary-implementations` 仅筛选显示。
+上述 case 筛选排除不支持的 FP8 规格。指定的方法在某个规格不可用时明确报错。
+
+## SIMT 直接读写 GM 候选
+
+`paged_cache_gather_simt.py` 提供 `tilelang-simt`，不替换默认实现。
+使用 `T.SimtVF(threads=256)`，线程按展平元素并行，执行请求二分、页表寻址，
+直接读取 GM cache 并写入 GM dst；不分配 payload UB，不使用组级 DMA 事件。
+FP8 路径在 SIMT 内转 FP32、乘 scale、写目标 dtype，覆盖原七种规格。
+这是一版基线：同一行各元素可能重复计算和读取元数据，不能预先保证更快。
+若当前后端不支持该 GM 访问模式或 FP8 转换，设备编译会暴露，尚未实机确认。
+流水应关注 SIMT 访存和指令开销，不能再仅用 MTE2/MTE3 的密集程度评价。
+
+先验证：
+
+```bash
+python -m pytest tests/ops/test_paged_cache_gather_simt_ascend.py --tileops-device=npu -q
+```
+
+只执行 auto2 与 SIMT 两者，不运行其他实验或公共 tileops：
+
+```bash
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/simt \
+  --run-dir "./benchmark-results/simt-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --implementation-factory benchmarks.ascend.gather_auto:make_simt_implementations \
+  --implementations tilelang-auto2 tilelang-simt
+```
+
+可先追加 `--verify-only`；流水脚本新增 `--implementation simt`。
+本地仅通过语法和 diff 检查，NPU 编译、数值及性能需要设备验证。
+
+## 固定总 UB 的交叠候选（当前重点）
+
+`tilelang-overlap32-r4`：每区域 32 行、每次读 4 行，两区域共 64 行。
+BF16、行宽 1024 时 payload 总计 128 KiB，和 batch16-r4 相同，写出粒度
+从 64 行改成 32 行。不是单区域原地覆盖；A/B 交替复用。
+
+本次还修正了交替区域的发射顺序：每轮先等待上一组 ready 并提交其 MTE3
+写出，再准备当前组地址、提交当前组 MTE2 读入；只有覆盖同一区域之前才
+等待其 release。避免当前组的标量页表访问延迟上一组写出提交。
+初始组只读，末尾组单独排空。这一顺序修正也作用于旧的 db 候选。
+事件约束的是对应流水线；是否真实重叠仍需生成代码和设备流水确认。
+
+下面只运行所选两种方法，不执行 SIMT、默认 tileops 或其他实验：
+
+```bash
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/overlap \
+  --run-dir "./benchmark-results/overlap-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --case-regex "^(ds-v3-mixed|llama-70b-cp|mla-small|llama-cp-unaligned|mla-b256)-" \
+  --implementation-factory benchmarks.ascend.gather_auto:make_overlap_implementations \
+  --implementations tilelang-batch16-r4 tilelang-overlap32-r4
+```
+
+先加 `--verify-only`。只验证新候选的 pytest 命令：
+
+```bash
+python -m pytest tests/ops/test_paged_cache_gather_batch_ascend.py \
+  --tileops-device=npu -k overlap32-r4 -q
+```
+
+流水脚本使用 `--implementation overlap32-r4 --source-dir ./pipeline-results/overlap-source`。
+重点查看：上一组 ub2gm 是否在本组地址准备及 gm2ub 之前提交，两个区域的
+release 等待是否只发生在复用之前。相邻组地址不重叠不代表硬件一定并行。
+本地没有 NPU，仅完成语法、diff 和事件配对模型检查。

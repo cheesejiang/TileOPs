@@ -12,7 +12,8 @@ from tileops.kernels.attention.paged_cache_gather import PagedKVCacheGatherCall
 class AutoGather:
     """Public-layout adapter; compile on first use, including strided-output staging."""
 
-    def __init__(self, stages=1, tile_rows=16, segmented=False, group_tiles=None, double_buffer=False):
+    def __init__(self, stages=1, tile_rows=16, segmented=False, group_tiles=None, double_buffer=False, simt=False):
+        self.simt = simt
         self.double_buffer = double_buffer
         self.group_tiles = group_tiles
         self.stages = stages
@@ -31,7 +32,10 @@ class AutoGather:
         )
         kernel = self.kernels.get(call)
         if kernel is None:
-            if self.group_tiles is not None:
+            if self.simt:
+                from tileops.kernels.ascend.attention.paged_cache_gather_simt import AscendPagedKVCacheGatherSimtKernel
+                kernel = AscendPagedKVCacheGatherSimtKernel(call)
+            elif self.group_tiles is not None:
                 from tileops.kernels.ascend.attention.paged_cache_gather_batch import AscendPagedKVCacheGatherBatchKernel
                 kernel = AscendPagedKVCacheGatherBatchKernel(call, group_tiles=self.group_tiles, double_buffer=self.double_buffer, tile_rows=self.tile_rows)
             else:
@@ -48,11 +52,11 @@ class AutoGather:
 
 
 class _Run:
-    def __init__(self, inputs, stages, tile_rows=16, segmented=False, group_tiles=None, double_buffer=False):
+    def __init__(self, inputs, stages, tile_rows=16, segmented=False, group_tiles=None, double_buffer=False, simt=False):
         self.dst = torch.empty_like(inputs[0])
         self.inputs = inputs[1:]
-        self.op = AutoGather(stages, tile_rows, segmented, group_tiles, double_buffer)
-        self.provenance = {"schedule": "batched" if group_tiles else "automatic", "stages": stages,
+        self.op = AutoGather(stages, tile_rows, segmented, group_tiles, double_buffer, simt)
+        self.provenance = {"schedule": "simt-direct" if simt else ("batched" if group_tiles else "automatic"), "stages": stages,
                            "group_tiles": group_tiles, "double_buffer": double_buffer,
                            "tile_rows": tile_rows,
                            "segmented": segmented,
@@ -112,5 +116,31 @@ def make_load_granularity_implementations(op_name, case):
         (4, 16, "tilelang-batch4"), (16, 4, "tilelang-batch16-r4"),
     ):
         run = _Run(case.inputs, stages=1, group_tiles=group_tiles, tile_rows=tile_rows)
+        result[name] = Implementation(run, args=(), reset=run.reset)
+    return result
+
+
+def make_simt_implementations(op_name, case):
+    """Only SIMT and auto2; use --implementations to exclude the default binder."""
+    if op_name != "PagedKVCacheGatherFwdOp":
+        return {}
+    result = {}
+    for name, simt in (("tilelang-auto2", False), ("tilelang-simt", True)):
+        run = _Run(case.inputs, stages=2, simt=simt)
+        result[name] = Implementation(run, args=(), reset=run.reset)
+    return result
+
+
+def make_overlap_implementations(op_name, case):
+    """128 KiB payload at width 1024 BF16: serial 64 rows versus 2x32 rows."""
+    if op_name != "PagedKVCacheGatherFwdOp" or case.inputs[1].dtype not in (torch.float16, torch.bfloat16):
+        return {}
+    result = {}
+    for name, group_tiles, double_buffer in (
+        ("tilelang-batch16-r4", 16, False),
+        ("tilelang-overlap32-r4", 8, True),
+    ):
+        run = _Run(case.inputs, stages=1, group_tiles=group_tiles,
+                   tile_rows=4, double_buffer=double_buffer)
         result[name] = Implementation(run, args=(), reset=run.reset)
     return result

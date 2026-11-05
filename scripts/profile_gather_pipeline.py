@@ -14,7 +14,7 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--implementation", choices=("manual", "auto2", "batch2", "batch4", "batch2-db", "batch4-db", "batch16-r4", "gatherv2-core"), required=True)
+    parser.add_argument("--implementation", choices=("manual", "auto2", "simt", "batch2", "batch4", "batch2-db", "batch4-db", "batch16-r4", "overlap32-r4", "gatherv2-core"), required=True)
     parser.add_argument("--source-dir", type=Path)
     parser.add_argument("--profile-dir", type=Path,
                         help="real-device profiler with automatic analysis; omit for simulator runs")
@@ -60,12 +60,15 @@ def main():
             row_width=width, dtype=torch.bfloat16, out_dtype=torch.bfloat16,
             has_starts=True, device=device,
         )
-        if args.implementation in ("batch2", "batch4", "batch2-db", "batch4-db", "batch16-r4"):
+        if args.implementation == "simt":
+            from tileops.kernels.ascend.attention.paged_cache_gather_simt import AscendPagedKVCacheGatherSimtKernel
+            kernel = AscendPagedKVCacheGatherSimtKernel(call)
+        elif args.implementation in ("batch2", "batch4", "batch2-db", "batch4-db", "batch16-r4", "overlap32-r4"):
             from tileops.kernels.ascend.attention.paged_cache_gather_batch import AscendPagedKVCacheGatherBatchKernel
             kernel = AscendPagedKVCacheGatherBatchKernel(
-                call, group_tiles=16 if args.implementation == "batch16-r4" else (4 if args.implementation.startswith("batch4") else 2),
-                tile_rows=4 if args.implementation == "batch16-r4" else 16,
-                double_buffer=args.implementation.endswith("-db"))
+                call, group_tiles=8 if args.implementation == "overlap32-r4" else (16 if args.implementation == "batch16-r4" else (4 if args.implementation.startswith("batch4") else 2)),
+                tile_rows=4 if args.implementation in ("batch16-r4", "overlap32-r4") else 16,
+                double_buffer=args.implementation.endswith("-db") or args.implementation == "overlap32-r4")
         else:
             kernel = (AscendPagedKVCacheGatherKernel(call) if args.implementation == "manual"
                   else AscendPagedKVCacheGatherAutoKernel(call, stages=2, tile_rows=16))

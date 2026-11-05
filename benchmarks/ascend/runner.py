@@ -96,6 +96,8 @@ def main(argv=None):
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--op", action="append", required=True)
     parser.add_argument("--case-regex")
+    parser.add_argument("--implementations", nargs="+", metavar="NAME",
+                        help="run only these named implementations, including verification")
     parser.add_argument("--clock-config", type=Path)
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--unlocked", action="store_true",
@@ -205,15 +207,23 @@ def main(argv=None):
                         torch.manual_seed(seed)
                         row["seed"] = seed
                         try:
-                            op = op_class(**case.arguments)
-                            implementations = {"tileops": entry(op_name).binder(op, case)}
-                            if args.include_reference:
+                            selected = set(args.implementations) if args.implementations else None
+                            implementations = {}
+                            if selected is None or "tileops" in selected:
+                                op = op_class(**case.arguments)
+                                implementations["tileops"] = entry(op_name).binder(op, case)
+                            if args.include_reference and (selected is None or "reference" in selected):
                                 implementations["reference"] = Implementation(case.reference)
                             for factory in factories:
                                 extra = factory(op_name, case)
                                 if set(extra) & set(implementations):
                                     raise ValueError("Duplicate implementation tags")
                                 implementations.update(extra)
+                            if selected is not None:
+                                missing = selected - set(implementations)
+                                if missing:
+                                    raise ValueError(f"Requested implementations unavailable for {case.id}: {sorted(missing)}")
+                                implementations = {tag: impl for tag, impl in implementations.items() if tag in selected}
                             row["implementations"] = benchmark_case(
                                 case,
                                 implementations,
