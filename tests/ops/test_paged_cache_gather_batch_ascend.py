@@ -18,14 +18,14 @@ def _require_npu():
 
 
 @pytest.mark.smoke
-@pytest.mark.parametrize('group_tiles', [2, 4])
+@pytest.mark.parametrize('group_tiles,double_buffer', [(2, False), (4, False), (2, True)])
 @pytest.mark.parametrize('case', [c for c in _cases() if 'fp8' not in c.case_id], ids=lambda c: c.case_id)
-def test_batch_manifest(case, group_tiles):
+def test_batch_manifest(case, group_tiles, double_buffer):
     _require_npu()
     workload = GatherWorkload(case)
     args = workload.gen_inputs()
     call = dataclasses.replace(_request(case), device=args[0].device)
-    kernel = AscendPagedKVCacheGatherBatchKernel(call, group_tiles)
+    kernel = AscendPagedKVCacheGatherBatchKernel(call, group_tiles, double_buffer=double_buffer)
     for replay in range(2):
         if replay:
             args[2].copy_(args[2].flip(-1))
@@ -38,9 +38,9 @@ def test_batch_manifest(case, group_tiles):
 
 
 @pytest.mark.smoke
-@pytest.mark.parametrize('group_tiles', [2, 4])
+@pytest.mark.parametrize('group_tiles,double_buffer', [(2, False), (4, False), (2, True)])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
-def test_batch_split_boundaries(group_tiles, dtype):
+def test_batch_split_boundaries(group_tiles, double_buffer, dtype):
     _require_npu()
     workload = PagedKVCacheGatherWorkload(
         [0, 1, 0, 2, 13, 0, 19], (576,), 16, dtype, None,
@@ -54,5 +54,5 @@ def test_batch_split_boundaries(group_tiles, dtype):
         out_dtype=dtype, has_starts=True, device=dst.device,
     )
     expected = workload.ref_program(*args)
-    AscendPagedKVCacheGatherBatchKernel(call, group_tiles)(*args)
+    AscendPagedKVCacheGatherBatchKernel(call, group_tiles, double_buffer=double_buffer)(*args)
     torch.testing.assert_close(dst, expected, rtol=0, atol=0)

@@ -28,11 +28,14 @@ def _gather_bandwidth(row, latency_ms):
     return f"{traffic / latency_ms / 1e6:.1f}"
 
 
-def write_summary(run, receipt):
+def write_summary(run, receipt, implementations=None):
     """Generate a CPU-only report after the final guard receipt is known."""
+    selected = set(implementations) if implementations else None
     valid = receipt["status"] == "passed"
     lines = ["# Ascend benchmark 汇总", "",
              f"运行状态：{receipt['status']}；guard 退出码：{receipt['guard_exit_code']}。", ""]
+    if selected:
+        lines += ["显示实现：" + ", ".join(sorted(selected)) + "。", ""]
     if not valid:
         lines += ["本次运行失败，下表仅供诊断，耗时不能作为有效性能结果。", ""]
     lines += ["| 算子 | 规格 | 实现 | 状态 | 平均耗时（μs） | 标准差（μs） | 估算有效带宽（GB/s） | 最大绝对误差 | 协议 |",
@@ -48,8 +51,10 @@ def write_summary(run, receipt):
             except ValueError:
                 lines.append(f"| — | results.jsonl 第 {number} 行不完整 | — | 无法解析 | — | — | — | — | — |")
                 continue
-            implementations = row.get("implementations") or {"—": {}}
-            for name, result in implementations.items():
+            results = row.get("implementations") or {"—": {}}
+            for name, result in results.items():
+                if selected is not None and name not in selected:
+                    continue
                 measurement = result.get("measurement", {})
                 correctness = result.get("correctness", {})
                 latency = measurement.get("latency_ms")
@@ -79,6 +84,8 @@ def main():
     parser.add_argument(
         "--run-dir", type=Path, required=True, help="new directory; existing output is never reused"
     )
+    parser.add_argument("--summary-implementations", nargs="+", metavar="NAME",
+                        help="implementation names to display in summary.md; raw results stay complete")
     parser.add_argument("--owner", required=True)
     parser.add_argument("--device", type=int, help="physical NPU ID on a multi-card host")
     parser.add_argument("--wait", type=int, default=600)
@@ -135,7 +142,7 @@ def main():
     }
     (run / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps({"run_dir": str(run), **receipt}, indent=2))
-    write_summary(run, receipt)
+    write_summary(run, receipt, args.summary_implementations)
     return 0 if success else (result.returncode or 1)
 
 

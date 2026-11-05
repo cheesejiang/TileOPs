@@ -85,6 +85,25 @@ class LauncherRoutingTest(unittest.TestCase):
             self.assertIn("bad\\|case", report)
             self.assertIn("无法解析", report)
 
+    def test_summary_filters_implementations_without_changing_raw_results(self):
+        root = Path(__file__).resolve().parents[2]
+        spec = importlib.util.spec_from_file_location("ascend_filtered_report", root / "scripts/benchmark_ascend.py")
+        launcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(launcher)
+        with tempfile.TemporaryDirectory() as temp:
+            run = Path(temp)
+            raw = json.dumps({"op": "Gather", "case_id": "sample", "status": "measured",
+                              "implementations": {name: {} for name in
+                                                  ("tileops", "tilelang-auto1", "tilelang-batch2-db")}})
+            (run / "results.jsonl").write_text(raw)
+            launcher.write_summary(run, {"status": "passed", "guard_exit_code": 0},
+                                   ["tileops", "tilelang-batch2-db"])
+            report = (run / "summary.md").read_text()
+            self.assertIn("| tileops |", report)
+            self.assertIn("| tilelang-batch2-db |", report)
+            self.assertNotIn("tilelang-auto1", report)
+            self.assertEqual((run / "results.jsonl").read_text(), raw)
+
 
 if __name__ == "__main__":
     unittest.main()
