@@ -18,9 +18,8 @@ from tileops.kernels.kernel_base import Kernel
 
 @functools.lru_cache(maxsize=64)
 def _compile(batch, pages, page_size, table_width, width, dtype, out_dtype, starts, blocks, stages=1):
-    # Whole-page DMA for the large MLA cases; smaller tiles limit the cost
-    # of unaligned starts while retaining a full page for 16-row Llama pages.
-    tile_rows = 16 if starts or stages == 2 else page_size
+    # Keep tile geometry identical so stage-count comparisons isolate pipelining.
+    tile_rows = 16
     quantized = dtype == "float8_e4m3fn"
     total = T.dynamic("total")
 
