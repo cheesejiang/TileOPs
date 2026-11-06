@@ -394,3 +394,31 @@ python scripts/benchmark_ascend.py \
 先追加 `--verify-only`。流水脚本选择 `--implementation precompute32-r4`，
 该候选固定 store0。重点检查预计算启动成本，以及稳定搬运阶段标量/GM 页表
 依赖是否减少。语法/diff 已检查，本地没有 NPU，尚未验证设备编译和性能。
+
+## 当前运行：32/60 行的原版与预计算版，四个一起
+
+| 实现 | 每区域行数 | 每次读入行数 | 地址准备 |
+| --- | ---: | ---: | --- |
+| `tilelang-overlap32-r4-store0` | 32 | 4 | 每组准备 |
+| `tilelang-precompute32-r4-store0` | 32 | 4 | 先准备本核全部行号 |
+| `tilelang-overlap60-r1-store0` | 60 | 1 | 每组准备 |
+| `tilelang-precompute60-r1-store0` | 60 | 1 | 先准备本核全部行号 |
+
+全部两个 UB 区域轮转、store0，预计算均计入 kernel 时间。
+60 行预计算版保持原 60 行候选“先提交两组读入、再提交首组写出”的顺序；
+32 行版保持上一组先提交写出。比较每一对才能评估地址预计算的影响。
+60 行版的 payload 240 KiB 之外还需行号表，需检查设备 UB 容量。
+
+```bash
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/precompute-four \
+  --run-dir "./benchmark-results/precompute-four-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --case-regex "^(ds-v3-mixed|llama-70b-cp|mla-small|llama-cp-unaligned|mla-b256)-" \
+  --implementation-factory benchmarks.ascend.gather_auto:make_precompute_four_implementations \
+  --implementations tilelang-overlap32-r4-store0 tilelang-precompute32-r4-store0 tilelang-overlap60-r1-store0 tilelang-precompute60-r1-store0
+```
+
+先追加 `--verify-only`；不执行其他候选。pytest 预计算测试现在覆盖两种布局。
+流水脚本新增 `--implementation precompute60-r1`，写出模式固定为 0。
+本地语法、diff 和结构回归检查通过；尚未完成 NPU 编译与验证。

@@ -12,13 +12,15 @@ from workloads.device import run_device, run_device_available
 
 @pytest.mark.smoke
 @pytest.mark.parametrize("case", [c for c in _cases() if "fp8" not in c.case_id], ids=lambda c: c.case_id)
-def test_precompute_manifest(case):
+@pytest.mark.parametrize("group_rows,tile_rows", [(32, 4), (60, 1)])
+def test_precompute_manifest(case, group_rows, tile_rows):
     if torch.device(run_device()).type != "npu" or not run_device_available():
         pytest.skip("requires Ascend and --tileops-device=npu")
     workload = GatherWorkload(case)
     args = workload.gen_inputs()
     kernel = AscendPagedKVCacheGatherPrecomputeKernel(
-        dataclasses.replace(_request(case), device=args[0].device), total_rows=args[0].shape[0])
+        dataclasses.replace(_request(case), device=args[0].device), total_rows=args[0].shape[0],
+        group_rows=group_rows, tile_rows=tile_rows)
     for replay in range(2):
         if replay:
             args[2].copy_(args[2].flip(-1))

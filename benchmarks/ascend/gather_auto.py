@@ -37,7 +37,9 @@ class AutoGather:
         if kernel is None:
             if self.precompute:
                 from tileops.kernels.ascend.attention.paged_cache_gather_precompute import AscendPagedKVCacheGatherPrecomputeKernel
-                kernel = AscendPagedKVCacheGatherPrecomputeKernel(call, total_rows=dst.shape[0])
+                kernel = AscendPagedKVCacheGatherPrecomputeKernel(
+                    call, total_rows=dst.shape[0], group_rows=self.group_tiles * self.tile_rows,
+                    tile_rows=self.tile_rows)
             elif self.simt:
                 from tileops.kernels.ascend.attention.paged_cache_gather_simt import AscendPagedKVCacheGatherSimtKernel
                 kernel = AscendPagedKVCacheGatherSimtKernel(call)
@@ -219,4 +221,20 @@ def make_precompute_implementations(op_name, case):
         run = _Run(case.inputs, stages=1, group_tiles=8, tile_rows=4,
                    double_buffer=True, store_l2_cache_ctrl=0, precompute=precompute)
         result[name] = Implementation(run, args=(), reset=run.reset)
+    return result
+
+
+def make_precompute_four_implementations(op_name, case):
+    """32/60-row schedules, each with per-group or whole-core address preparation."""
+    if op_name != "PagedKVCacheGatherFwdOp" or case.inputs[1].dtype not in (torch.float16, torch.bfloat16):
+        return {}
+    result = {}
+    for group_rows, tile_rows in ((32, 4), (60, 1)):
+        for precompute in (False, True):
+            prefix = "precompute" if precompute else "overlap"
+            name = f"tilelang-{prefix}{group_rows}-r{tile_rows}-store0"
+            run = _Run(case.inputs, stages=1, group_tiles=group_rows // tile_rows,
+                       tile_rows=tile_rows, double_buffer=True, store_l2_cache_ctrl=0,
+                       precompute=precompute)
+            result[name] = Implementation(run, args=(), reset=run.reset)
     return result
