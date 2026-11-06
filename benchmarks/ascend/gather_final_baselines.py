@@ -113,3 +113,18 @@ def make_implementations(op_name, case):
     else:
         raise ValueError(f'Unsupported baseline cache dtype: {dtype}')
     return {tag: Implementation(run, args=(), reset=run.reset)}
+
+
+def make_core_implementations(op_name, case):
+    """Non-FP8: GatherV2 core only; FP8: the existing vllm full adapter.
+
+    Core precomputes physical indices outside timing and is a partial-work
+    comparison. The full baseline factory remains unchanged.
+    """
+    if op_name != 'PagedKVCacheGatherFwdOp':
+        return {}
+    if case.inputs[1].dtype in (torch.float16, torch.bfloat16):
+        from benchmarks.ascend.gather_v2_baseline import _Run
+        run = _Run(case.inputs, include_index_generation=False)
+        return {'ops-nn-gatherv2-core': Implementation(run, args=(), reset=run.reset)}
+    return make_implementations(op_name, case)

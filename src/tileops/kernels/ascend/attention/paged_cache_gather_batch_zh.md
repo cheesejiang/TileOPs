@@ -718,3 +718,25 @@ export VLLM_ASCEND_ROOT=/实际工作区/vllm-ascend
 继续使用上节 final-baselines 的同一工厂与命令，先加 `--verify-only`。
 CPU源码加载/未知导入拒绝/工厂路由共5项测试通过，并静态核对四个本地文件的
 函数/类AST一致；尚无NPU运行验证。FP8基线仍为Triton组合，不是Ascend C。
+
+## 当前对照选择：非FP8用ops-nn core
+
+本次用户选择 core，不使用 ops-nn full：五个非FP8规格采用
+`ops-nn-gatherv2-core`，物理行索引在计时前生成，计时只包含ACLNN GatherV2。
+TileOPs仍包含页表寻址，因此这是完整算子与搬运core的部分工作量对照，
+不是相同计时输入的等价实现。两个FP8仍使用`vllm-ascend-fp8-full`，
+其工作范围不变，不将其称为core或Ascend C。
+
+先验证时在下面命令末尾追加 `--verify-only`。确认当前终端已加载CANN环境，
+OPS_NN_OPAPI_LIBRARY/OPS_NN_TENSOR_LIBRARY及VLLM_ASCEND_ROOT沿用前节。
+
+```bash
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/core-compare --timeout 7200 \
+  --run-dir "./benchmark-results/core-compare-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --implementation-factory benchmarks.ascend.gather_final_baselines:make_core_implementations
+```
+
+只运行公共tileops和每规格对应基线，七规格共14条结果。不运行ops-nn-full。
+原make_implementations仍保留full口径；选core时必须使用上面的make_core_implementations。
