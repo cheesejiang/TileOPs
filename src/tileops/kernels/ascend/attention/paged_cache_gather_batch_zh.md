@@ -422,3 +422,63 @@ python scripts/benchmark_ascend.py \
 先追加 `--verify-only`；不执行其他候选。pytest 预计算测试现在覆盖两种布局。
 流水脚本新增 `--implementation precompute60-r1`，写出模式固定为 0。
 本地语法、diff 和结构回归检查通过；尚未完成 NPU 编译与验证。
+
+## 当前组合性能测试：七个规格，只跑分块组合
+
+专用入口 `benchmarks.ascend.gather_sweep:make_implementations`。
+默认每区域行数 16/32/48，每次读入行数 1/2/4/8/16，共 15 个组合。
+全部保持 overlap32 的启动顺序（先提交上一组写出，再准备/读当前组）、
+双区域、store0、每组动态寻址，不使用整核地址预计算。
+每次实际片段仍受请求/页边界限制，因此非对齐输入可能拆成更小的读请求。
+
+七个 manifest 规格全部纳入，不加 case-regex。新增 FP8 路径：读入 FP8、
+SIMT 转 FP32 乘 scale、转输出 dtype、MTE3 写出；转换也计入耗时。
+FP8 需要输入和转换输出各两块区域，使用 MTE2_V、V_MTE3、MTE3_V 事件
+保证转换和复用顺序。非 FP8 保持 MTE2_MTE3。
+新文件 `paged_cache_gather_sweep.py` 不替换已有实测版本。
+
+在 TileOPs 根目录用 bash 执行完整命令：
+
+```bash
+export TILEOPS_GATHER_GROUP_ROWS=16,32,48
+export TILEOPS_GATHER_LOAD_ROWS=1,2,4,8,16
+
+# 生成执行白名单，既不运行默认 tileops，也不运行其他实验。
+IFS=',' read -ra group_rows_list <<< "$TILEOPS_GATHER_GROUP_ROWS"
+IFS=',' read -ra load_rows_list <<< "$TILEOPS_GATHER_LOAD_ROWS"
+gather_methods=()
+for group_rows in "${group_rows_list[@]}"; do
+  for load_rows in "${load_rows_list[@]}"; do
+    gather_methods+=("tilelang-sweep-g${group_rows}-r${load_rows}-store0")
+  done
+done
+
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/sweep \
+  --run-dir "./benchmark-results/gather-sweep-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --implementation-factory benchmarks.ascend.gather_sweep:make_implementations \
+  --implementations "${gather_methods[@]}"
+```
+
+先在命令末尾加 `--verify-only`，通过后去掉再测性能。默认 7×15=105 条
+方法/规格结果，第一次需要编译较多内核；1800 秒不够时可增加 launcher
+`--timeout`。输出在 run-dir 的 summary.md/results.jsonl，均只含所选组合。
+
+若想先只比较读入粒度，将 group 环境变量改成 `32`，再重新生成白名单；
+若只调区域大小，将 load 环境变量改成 `4`。所有输入值保持原 manifest。
+
+64 行区域作为显式选项，可把 group 环境变量设成 `16,32,48,64`，然后重新
+生成白名单。BF16、行宽 1024 时两区域 payload 已需 256 KiB，还不含元数据，
+可能编译失败；因此默认不包含64行。不静默替换或跳过组合，错误会记录为失败。
+FP8、行宽576时48行区域的输入/输出payload总计162KiB，另需元数据。
+
+独立正确性测试（105 个用例，每个包含修改页表/起点/scale后的重放）：
+
+```bash
+python -m pytest tests/ops/test_paged_cache_gather_sweep_ascend.py --tileops-device=npu -q
+```
+
+已完成本地语法、diff 及事件配对模型检查；无 NPU，尚未验证设备编译、数值
+或性能，必须先验证再引用结果。FP8 与 BF16 的UB布局和转换工作不同，
+只能在同一规格内比较各组合。
