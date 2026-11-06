@@ -65,7 +65,7 @@ def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks,
                 for group in T.serial(groups):
                     row = first + group * group_rows
                     valid = T.min(group_rows, end - row)
-                    if double_buffer:
+                    if double_buffer and group_tiles != 60:
                         # Issue the previous output BEFORE preparing current
                         # metadata (which contains dependent GM scalar reads).
                         # Otherwise metadata preparation can delay MTE3 launch.
@@ -131,6 +131,17 @@ def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks,
                                 T.copy(cache[physical:physical + count, :],
                                        src[0, target:target + count, :])
                         T.ascend_set_flag("MTE2_MTE3", 0)
+                    if double_buffer and group_tiles == 60:
+                        # Fill A and B before the first write. Thereafter queue
+                        # current reads before submitting the previous output.
+                        if group > 0:
+                            previous_row = row - group_rows
+                            for slot in T.unroll(buffers):
+                                if (group - 1) % buffers == slot:
+                                    T.ascend_wait_flag("MTE2_MTE3", slot)
+                                    T.copy(src[slot, :, :],
+                                           dst[previous_row:previous_row + group_rows, :], l2_cache_ctrl=store_l2_cache_ctrl)
+                                    T.ascend_set_flag("MTE3_MTE2", slot)
                     if not double_buffer:
                         T.ascend_wait_flag("MTE2_MTE3", 0)
                         if valid == group_rows:
@@ -174,8 +185,8 @@ class AscendPagedKVCacheGatherBatchKernel(AscendPagedKVCacheGatherKernel):
             raise ValueError(reason)
         if call.dtype not in (torch.float16, torch.bfloat16) or call.out_dtype != call.dtype:
             raise ValueError("batched gather requires matching FP16/BF16 cache and output")
-        if (group_tiles, tile_rows) not in ((2, 16), (4, 16), (16, 4), (8, 4)):
-            raise ValueError("supported (group_tiles, tile_rows): (2,16), (4,16), (16,4), (8,4)")
+        if (group_tiles, tile_rows) not in ((2, 16), (4, 16), (16, 4), (8, 4), (60, 1)):
+            raise ValueError("supported (group_tiles, tile_rows): (2,16), (4,16), (16,4), (8,4), (60,1)")
         if group_tiles == 16 and double_buffer:
             raise ValueError("16x4 candidate uses a single buffer")
         if store_l2_cache_ctrl not in (0, 4):

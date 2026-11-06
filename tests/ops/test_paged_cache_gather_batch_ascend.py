@@ -18,7 +18,7 @@ def _require_npu():
 
 
 @pytest.mark.smoke
-@pytest.mark.parametrize('group_tiles,double_buffer,tile_rows', [(2, False, 16), (4, False, 16), (2, True, 16), (4, True, 16), (16, False, 4), pytest.param(8, True, 4, id="overlap32-r4")])
+@pytest.mark.parametrize('group_tiles,double_buffer,tile_rows', [(2, False, 16), (4, False, 16), (2, True, 16), (4, True, 16), (16, False, 4), pytest.param(8, True, 4, id="overlap32-r4"), pytest.param(60, True, 1, id="overlap60-r1")])
 @pytest.mark.parametrize('case', [c for c in _cases() if 'fp8' not in c.case_id], ids=lambda c: c.case_id)
 @pytest.mark.parametrize("store_l2_cache_ctrl", [4, 0])
 def test_batch_manifest(case, group_tiles, double_buffer, tile_rows, store_l2_cache_ctrl):
@@ -41,7 +41,7 @@ def test_batch_manifest(case, group_tiles, double_buffer, tile_rows, store_l2_ca
 
 
 @pytest.mark.smoke
-@pytest.mark.parametrize('group_tiles,double_buffer,tile_rows', [(2, False, 16), (4, False, 16), (2, True, 16), (4, True, 16), (16, False, 4), pytest.param(8, True, 4, id="overlap32-r4")])
+@pytest.mark.parametrize('group_tiles,double_buffer,tile_rows', [(2, False, 16), (4, False, 16), (2, True, 16), (4, True, 16), (16, False, 4), pytest.param(8, True, 4, id="overlap32-r4"), pytest.param(60, True, 1, id="overlap60-r1")])
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
 def test_batch_split_boundaries(group_tiles, double_buffer, tile_rows, dtype):
     _require_npu()

@@ -321,3 +321,40 @@ python scripts/profile_gather_pipeline.py \
 脚本静态检查生成源码中读完成事件、写出及写完成事件的先后位置，
 不符合时停止。该检查不是指令执行顺序/时间证明，仍需查看同核流水。
 本地只检查语法、diff 及检查器正则，未进行设备编译和流水采集。
+
+## GatherV2 地址结构对照：两个 60 行区域、逐行读入
+
+新增 `tilelang-overlap60-r1-store0`：每区 60 行、每次读 1 行、两个区域交替。
+BF16、行宽 1024 时每次读 2 KiB、每区 120 KiB，总 payload 240 KiB。
+加上元数据和描述符后容量更大，是否满足当前设备限制须由设备编译确认。
+区域起点相距 0x1e000；UB 基址可能非零，不能要求绝对地址等于 GatherV2。
+
+该候选先提交 A/B 两组读入，再提交 A 写出；后续复用区域前等待其上次
+写出完成，并排空尾组。单组/空核均保留边界处理。使用 store0。
+这里复现观察到的区域大小、逐行粒度及启动预取顺序，不宣称与 CANN
+内部指令调度完全一致。仍有动态描述符、逐行页表寻址；60 行不整除
+16 行页，跨页和尾部必须走实际元数据处理，不能写死输入内容。
+
+只执行当前 32 行与新 60 行候选：
+
+```bash
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/overlap60 \
+  --run-dir "./benchmark-results/overlap60-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --case-regex "^(ds-v3-mixed|llama-70b-cp|mla-small|llama-cp-unaligned|mla-b256)-" \
+  --implementation-factory benchmarks.ascend.gather_auto:make_gatherv2_layout_implementations \
+  --implementations tilelang-overlap32-r4-store0 tilelang-overlap60-r1-store0
+```
+
+先追加 `--verify-only`。只验证新配置的 pytest：
+
+```bash
+python -m pytest tests/ops/test_paged_cache_gather_batch_ascend.py \
+  --tileops-device=npu -k overlap60-r1 -q
+```
+
+流水应用选择 `--implementation overlap60-r1 --store-l2-cache-ctrl 0`。
+预期更大请求窗口可能改善重叠，但逐行地址计算/发射开销也可能抵消收益。
+此对照同时改变组大小、读入粒度和启动顺序，不能归因于单个变量。
+本地已通过语法和 diff 检查，未完成设备编译/正确性或性能验证。

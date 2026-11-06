@@ -187,3 +187,18 @@ def make_auto2_store0_implementations(op_name, case):
         "tilelang-auto2-store0": Implementation(automatic, args=(), reset=automatic.reset),
         "tilelang-overlap32-r4-store0": Implementation(overlap, args=(), reset=overlap.reset),
     }
+
+
+def make_gatherv2_layout_implementations(op_name, case):
+    """Compare 2x32-row/4-row loads with 2x60-row/1-row loads, both store0."""
+    if op_name != "PagedKVCacheGatherFwdOp" or case.inputs[1].dtype not in (torch.float16, torch.bfloat16):
+        return {}
+    result = {}
+    for name, group_tiles, tile_rows in (
+        ("tilelang-overlap32-r4-store0", 8, 4),
+        ("tilelang-overlap60-r1-store0", 60, 1),
+    ):
+        run = _Run(case.inputs, stages=1, group_tiles=group_tiles, tile_rows=tile_rows,
+                   double_buffer=True, store_l2_cache_ctrl=0)
+        result[name] = Implementation(run, args=(), reset=run.reset)
+    return result
