@@ -5,12 +5,9 @@ full FP32 cache conversion/clone, Triton state copy and Triton scale application
 It is a Triton baseline, not an Ascend C implementation.
 """
 import functools
-import hashlib
-import importlib
 import math
 import os
 from pathlib import Path
-import sys
 
 import torch
 
@@ -19,19 +16,42 @@ from benchmarks.api import Implementation
 
 @functools.lru_cache(maxsize=1)
 def _vllm_modules():
-    root = os.environ.get('VLLM_ASCEND_ROOT')
-    if root:
-        checkout = Path(root).resolve(strict=True)
-        if not (checkout / 'vllm_ascend').is_dir():
-            raise ValueError('VLLM_ASCEND_ROOT must contain vllm_ascend/')
-        sys.path.insert(0, str(checkout))
-    native = importlib.import_module('vllm_ascend.ops.triton.kda_state_copy_kernel')
-    scaler = importlib.import_module('vllm_ascend.ops.triton.muls_add')
-    sources = {}
-    for module in (native, scaler):
-        path = Path(module.__file__).resolve()
-        sources[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
-    return native, scaler, sources
+    from benchmarks.ascend.vendor_source import load_source
+
+    configured = os.environ.get('VLLM_ASCEND_ROOT')
+    if not configured:
+        raise RuntimeError('Set VLLM_ASCEND_ROOT to the source checkout containing vllm_ascend/')
+    checkout = Path(configured).resolve(strict=True)
+    vendor = checkout / 'vllm_ascend'
+    if not vendor.is_dir():
+        raise ValueError('VLLM_ASCEND_ROOT must contain vllm_ascend/')
+    try:
+        import triton
+        import triton.language as tl
+    except ImportError as exc:
+        raise RuntimeError('An Ascend-capable Triton installation is required; full vLLM is not required') from exc
+    try:
+        target = triton.runtime.driver.active.get_current_target()
+    except Exception as exc:
+        raise RuntimeError('Cannot activate Ascend Triton backend; check CANN and the Triton wheel') from exc
+    if target.backend not in ('ascend', 'npu', 'cann'):
+        raise RuntimeError(f'Expected Ascend Triton backend, found {target.backend!r}')
+    bindings = {'triton': triton, 'tl': tl, 'HAS_TRITON': True}
+    # Load the original hardware utility, not a hardcoded replacement for core count.
+    envs, env_evidence = load_source(vendor / 'envs.py', {})
+    hardware, hardware_evidence = load_source(
+        vendor / 'ops/triton/triton_utils.py', bindings | {'envs': envs})
+    hardware.init_device_properties_triton()
+    native, native_evidence = load_source(vendor / 'ops/triton/kda_state_copy_kernel.py', bindings)
+    scaler, scaler_evidence = load_source(
+        vendor / 'ops/triton/muls_add.py',
+        bindings | {'get_vectorcore_num': hardware.get_vectorcore_num})
+    evidence = {
+        'loading': 'source-only-no-vllm-package-import',
+        'triton_version': triton.__version__, 'triton_backend': target.backend,
+        'modules': [env_evidence, hardware_evidence, native_evidence, scaler_evidence],
+    }
+    return native, scaler, evidence
 
 
 class _VllmFP8Run:
@@ -41,7 +61,7 @@ class _VllmFP8Run:
         self.native, self.scaler, sources = _vllm_modules()
         self.provenance = {
             'library': 'vllm-ascend', 'implementation_language': 'Triton',
-            'source_sha256': sources, 'api': '_kda_state_copy_kernel + muls_add_triton',
+            'source_loading': sources, 'api': '_kda_state_copy_kernel + muls_add_triton',
             'scope': 'historical-fp8-adapter-with-dst-copy',
             'cpu_indices_each_call': True, 'full_cache_fp32_clone_each_call': True,
             'dst_copy_included': True,

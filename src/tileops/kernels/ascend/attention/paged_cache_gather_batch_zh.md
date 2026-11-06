@@ -645,12 +645,13 @@ vllm基线包含额外dst.copy_以匹配公共写回接口，与交付包返回�
 ```bash
 export OPS_NN_OPAPI_LIBRARY=/home/CANN/9.3.0.weekly.20260916/cann-9.3.0/x86_64-linux/lib64/libopapi_nn.so
 export OPS_NN_TENSOR_LIBRARY=/home/CANN/9.3.0.weekly.20260916/cann-9.3.0/x86_64-linux/lib64/libnnopbase.so
-# 使用已安装且可导入的 vllm/vllm_ascend、Ascend Triton；从checkout导入时设置：
+# 不需要安装完整 vllm/vllm-ascend；指定源码目录：
 export VLLM_ASCEND_ROOT=/实际位置/vllm-ascend
 ```
 
-VLLM_ASCEND_ROOT必须包含vllm_ascend/，可用完整checkout；该选项不安装依赖。
-需要vllm.triton_utils、Ascend Triton及vllm_ascend相关依赖能正常导入。
+VLLM_ASCEND_ROOT必须包含vllm_ascend/，可用完整checkout或交付包内源码目录。
+无需安装vllm或vllm-ascend，但需要能在950/CANN环境运行的Ascend Triton。
+源码加载器只重绑定批准的框架导入，原kernel、包装函数和硬件查询函数不改写。
 不自动替换其他kernel，不使用缺失依赖的回退；错误记录在results.jsonl。
 导入和运行NPU代码均在guard取得设备之后，切勿在未预约的共享卡上手动探测。
 
@@ -681,6 +682,39 @@ vllm的CPU物理索引计算/scale.item主机等待不作为CPU耗时加入，�
 出现在报告中以profiler实际捕获任务为准。设备类型转换、clone、gather、scale、
 输出转换/copy均在调用内，不将其主动移出计时。不能据此直接复现旧表数字。
 
-基线来源路径和哈希写入provenance；vllm记录两个原生模块的源码SHA256，
+基线来源路径和哈希写入provenance；vllm记录四个原始及适配后模块的SHA256、Triton版本和后端，
 并不等同完整部署环境取证。本地无NPU/CANN/Ascend Triton环境，已做语法与
 工厂路由检查，未编译或执行设备性能测量。
+
+
+## vllm 基线改为纯源码加载（无需安装完整框架）
+
+当前 `gather_final_baselines.py` 已取消直接导入 vllm/vllm_ascend 包。
+只需 torch/torch_npu、可用的 Ascend Triton，以及以下四个源码文件：
+
+```text
+$VLLM_ASCEND_ROOT/vllm_ascend/envs.py
+$VLLM_ASCEND_ROOT/vllm_ascend/ops/triton/triton_utils.py
+$VLLM_ASCEND_ROOT/vllm_ascend/ops/triton/kda_state_copy_kernel.py
+$VLLM_ASCEND_ROOT/vllm_ascend/ops/triton/muls_add.py
+```
+
+完整本地checkout可用：
+
+```bash
+export VLLM_ASCEND_ROOT=/实际工作区/vllm-ascend
+```
+
+也可指向旧团队源码包中的 `ascend_baselines/vllm-ascend`，前提四文件都存在。
+不需要pip install vllm/vllm-ascend，不自动安装或升级torch、torch_npu、Triton。
+现有triton包是否带Ascend后端由运行时检查；只有CUDA/CPU后端会明确报错。
+
+在guard内，加载器先激活Ascend Triton，读取原始硬件工具初始化设备属性，
+然后加载原state-copy及muls_add。只替换已批准的ImportFrom模块绑定；新增的
+未知框架依赖会报错，不绕过。适配源码写到临时目录供Triton JIT读取函数体，
+原路径、原SHA256、生成路径/生成SHA256及Triton版本写入provenance。
+不伪造vllm包，不替换sys.modules中的实际框架模块，不改kernel参数或计算体。
+
+继续使用上节 final-baselines 的同一工厂与命令，先加 `--verify-only`。
+CPU源码加载/未知导入拒绝/工厂路由共5项测试通过，并静态核对四个本地文件的
+函数/类AST一致；尚无NPU运行验证。FP8基线仍为Triton组合，不是Ascend C。
