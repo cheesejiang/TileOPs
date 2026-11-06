@@ -99,23 +99,38 @@ def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks,
                         destinations[segments] = prepared
                         prepared = prepared + count
                         segments = segments + 1
-                    # Constant event IDs and buffer slices in each unrolled branch.
-                    for slot in T.unroll(buffers):
-                        if group % buffers == slot:
-                            if double_buffer:
-                                if group >= buffers:
-                                    T.ascend_wait_flag("MTE3_MTE2", slot)
-                            for segment in T.serial(segments):
-                                physical = addresses[segment]
-                                target = destinations[segment]
-                                count = lengths[segment]
-                                if count == tile_rows:
-                                    T.copy(cache[physical:physical + tile_rows, :],
-                                           src[slot, target:target + tile_rows, :])
-                                else:
-                                    T.copy(cache[physical:physical + count, :],
-                                           src[slot, target:target + count, :])
-                            T.ascend_set_flag("MTE2_MTE3", slot)
+                    if double_buffer:
+                        # Constant event IDs and buffer slices in each unrolled branch.
+                        for slot in T.unroll(buffers):
+                            if group % buffers == slot:
+                                if double_buffer:
+                                    if group >= buffers:
+                                        T.ascend_wait_flag("MTE3_MTE2", slot)
+                                for segment in T.serial(segments):
+                                    physical = addresses[segment]
+                                    target = destinations[segment]
+                                    count = lengths[segment]
+                                    if count == tile_rows:
+                                        T.copy(cache[physical:physical + tile_rows, :],
+                                               src[slot, target:target + tile_rows, :])
+                                    else:
+                                        T.copy(cache[physical:physical + count, :],
+                                               src[slot, target:target + count, :])
+                                T.ascend_set_flag("MTE2_MTE3", slot)
+                    else:
+                        # Dedicated single-buffer path: no slot/parity logic,
+                        # no prefetch and no previous-group output handling.
+                        for segment in T.serial(segments):
+                            physical = addresses[segment]
+                            target = destinations[segment]
+                            count = lengths[segment]
+                            if count == tile_rows:
+                                T.copy(cache[physical:physical + tile_rows, :],
+                                       src[0, target:target + tile_rows, :])
+                            else:
+                                T.copy(cache[physical:physical + count, :],
+                                       src[0, target:target + count, :])
+                        T.ascend_set_flag("MTE2_MTE3", 0)
                     if not double_buffer:
                         T.ascend_wait_flag("MTE2_MTE3", 0)
                         if valid == group_rows:

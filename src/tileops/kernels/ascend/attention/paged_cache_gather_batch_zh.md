@@ -301,3 +301,23 @@ python scripts/benchmark_ascend.py \
 流水脚本可使用 `--implementation auto2 --store-l2-cache-ctrl 0`，
 配合 `--source-dir` 确认包括尾部路径在内的所有 UB→GM 写出均为 mode 0。
 已扩展 auto 正确性用例验证模式 4/0；本地仅做语法和 diff 检查，设备验证待运行。
+
+## batch16-r4 单缓冲源码核查
+
+单缓冲读入现在使用独立代码分支，不再经过 slot 交替循环；原有组级
+MTE2→MTE3 和 MTE3→MTE2 同步保留。此改写明确区分实现路径，
+并不表示此前已经证实存在同步错误，也不保证改变生成指令或耗时。
+
+采集应用时导出新目录，避免混淆旧源码：
+
+```bash
+python scripts/profile_gather_pipeline.py \
+  --implementation batch16-r4 --store-l2-cache-ctrl 0 \
+  --source-dir "./pipeline-results/batch16-r4-audit-$(date +%Y%m%d-%H%M%S)" --check
+```
+
+除 `.cpp` 外，还生成 `batch16-r4.launch.json`，记录单缓冲参数、
+模式、完整组 16 次读入/128 KiB 写出及生成源码 SHA256。
+脚本静态检查生成源码中读完成事件、写出及写完成事件的先后位置，
+不符合时停止。该检查不是指令执行顺序/时间证明，仍需查看同核流水。
+本地只检查语法、diff 及检查器正则，未进行设备编译和流水采集。

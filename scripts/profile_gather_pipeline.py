@@ -78,8 +78,35 @@ def main():
                       call, stages=2, tile_rows=16, store_l2_cache_ctrl=args.store_l2_cache_ctrl))
         if args.source_dir:
             args.source_dir.mkdir(parents=True, exist_ok=True)
-            (args.source_dir / f"{args.implementation}.cpp").write_text(
-                kernel._compiled.get_kernel_source(), encoding="utf-8")
+            source = kernel._compiled.get_kernel_source()
+            source_path = args.source_dir / f"{args.implementation}.cpp"
+            source_path.write_text(source, encoding="utf-8")
+            if args.implementation == "batch16-r4":
+                import hashlib
+                import re
+
+                # Check emitted source, rather than just the Python flags.
+                event = lambda src, dst: rf"asc_sync_(?:notify|wait)\(PIPE_{src}, PIPE_{dst},"
+                read_done = re.search(event("MTE2", "MTE3"), source)
+                write_done = re.search(event("MTE3", "MTE2"), source)
+                stores = [m.start() for m in re.finditer("asc_copy_ub2gm_align\\(", source)]
+                if not (read_done and write_done and stores
+                        and read_done.start() < min(stores)
+                        and max(stores) < write_done.start()):
+                    raise RuntimeError("batch16-r4 generated source does not match single-group read/write ordering")
+                manifest = {
+                    "implementation": args.implementation,
+                    "double_buffer": False, "buffers": 1,
+                    "group_rows": 64, "load_rows": 4,
+                    "full_group_loads": 16, "full_group_store_bytes": 131072,
+                    "store_l2_cache_ctrl": args.store_l2_cache_ctrl,
+                    "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+                    "source_order_checked": True,
+                    "note": "Static source-order check only; not proof of device timing.",
+                }
+                (args.source_dir / "batch16-r4.launch.json").write_text(
+                    json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+                print(json.dumps(manifest, indent=2), flush=True)
         def launch():
             kernel(dst, cache, table, cu, starts)
 
