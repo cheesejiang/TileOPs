@@ -17,7 +17,7 @@ from tileops.kernels.kernel_base import Kernel
 
 
 @functools.lru_cache(maxsize=64)
-def _compile(batch, pages, page_size, table_width, width, dtype, out_dtype, starts, blocks, stages=1, tile_rows=16, segmented=False):
+def _compile(batch, pages, page_size, table_width, width, dtype, out_dtype, starts, blocks, stages=1, tile_rows=16, segmented=False, store_l2_cache_ctrl=4):
     quantized = dtype == "float8_e4m3fn"
     total = T.dynamic("total")
 
@@ -105,16 +105,16 @@ def _compile(batch, pages, page_size, table_width, width, dtype, out_dtype, star
                                     converted[r, c] = T.cast(src[r, c], "float32") * scale_ub[0]
                     if row + tile_rows <= total:
                         if quantized:
-                            T.copy(converted, dst[row:row + tile_rows, :])
+                            T.copy(converted, dst[row:row + tile_rows, :], l2_cache_ctrl=store_l2_cache_ctrl)
                         else:
-                            T.copy(src, dst[row:row + tile_rows, :])
+                            T.copy(src, dst[row:row + tile_rows, :], l2_cache_ctrl=store_l2_cache_ctrl)
                     else:
                         for r in T.serial(tile_rows):
                             if row + r < total:
                                 if quantized:
-                                    T.copy(converted[r, :], dst[row + r, :])
+                                    T.copy(converted[r, :], dst[row + r, :], l2_cache_ctrl=store_l2_cache_ctrl)
                                 else:
-                                    T.copy(src[r, :], dst[row + r, :])
+                                    T.copy(src[r, :], dst[row + r, :], l2_cache_ctrl=store_l2_cache_ctrl)
 
     return tilelang.compile(main, target="ascend", out_idx=[])
 
@@ -122,9 +122,11 @@ def _compile(batch, pages, page_size, table_width, width, dtype, out_dtype, star
 class AscendPagedKVCacheGatherAutoKernel(AscendPagedKVCacheGatherKernel):
     """Reuse manual host validation and launch contract, replace compilation only."""
 
-    def __init__(self, call, stages=1, tile_rows=16, segmented=False):
+    def __init__(self, call, stages=1, tile_rows=16, segmented=False, store_l2_cache_ctrl=4):
         if stages not in (1, 2):
             raise ValueError("automatic gather supports stages=1 or 2")
+        if store_l2_cache_ctrl not in (0, 4):
+            raise ValueError("store_l2_cache_ctrl must be 0 or 4")
         reason = self.refusal(call)
         if reason:
             raise ValueError(reason)
@@ -135,5 +137,5 @@ class AscendPagedKVCacheGatherAutoKernel(AscendPagedKVCacheGatherKernel):
         self._compiled = _compile(
             call.batch, call.num_pages, call.page_size, call.table_width, call.row_width,
             self.dtype_str, self.dtype_to_str(call.out_dtype), call.has_starts,
-            _vector_cores(self.device_index), stages, tile_rows, segmented,
+            _vector_cores(self.device_index), stages, tile_rows, segmented, store_l2_cache_ctrl,
         )

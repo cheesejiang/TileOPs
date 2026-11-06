@@ -18,7 +18,8 @@ from workloads.device import run_device, run_device_available
     (1, 16, False), (2, 16, False), (2, 32, False), (2, 16, True),
 ])
 @pytest.mark.parametrize("case", _cases(), ids=lambda case: case.case_id)
-def test_automatic_schedule(case, stages, tile_rows, segmented):
+@pytest.mark.parametrize("store_l2_cache_ctrl", [4, 0])
+def test_automatic_schedule(case, stages, tile_rows, segmented, store_l2_cache_ctrl):
     if torch.device(run_device()).type != "npu" or not run_device_available():
         pytest.skip("requires Ascend and --tileops-device=npu")
     workload = GatherWorkload(case)
@@ -27,7 +28,8 @@ def test_automatic_schedule(case, stages, tile_rows, segmented):
     if tile_rows > call.page_size:
         pytest.skip("32-row candidate requires pages with at least 32 rows")
     kernel = AscendPagedKVCacheGatherAutoKernel(
-        call, stages=stages, tile_rows=tile_rows, segmented=segmented)
+        call, stages=stages, tile_rows=tile_rows, segmented=segmented,
+        store_l2_cache_ctrl=store_l2_cache_ctrl)
     for replay in range(2):
         if replay:
             args[2].copy_(args[2].flip(-1))

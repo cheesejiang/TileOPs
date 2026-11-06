@@ -41,7 +41,8 @@ class AutoGather:
                 kernel = AscendPagedKVCacheGatherBatchKernel(call, group_tiles=self.group_tiles, double_buffer=self.double_buffer, tile_rows=self.tile_rows, store_l2_cache_ctrl=self.store_l2_cache_ctrl)
             else:
                 kernel = AscendPagedKVCacheGatherAutoKernel(
-                    call, stages=self.stages, tile_rows=self.tile_rows, segmented=self.segmented)
+                    call, stages=self.stages, tile_rows=self.tile_rows, segmented=self.segmented,
+                    store_l2_cache_ctrl=self.store_l2_cache_ctrl)
             self.kernels[call] = kernel
         output = dst if dst.is_contiguous() else torch.empty_like(dst, memory_format=torch.contiguous_format)
         kernel(output, cache, table.contiguous(), cu.contiguous(),
@@ -173,3 +174,16 @@ def make_store0_overlap_implementations(op_name, case):
                    double_buffer=double_buffer, store_l2_cache_ctrl=0)
         result[name] = Implementation(run, args=(), reset=run.reset)
     return result
+
+
+def make_auto2_store0_implementations(op_name, case):
+    """Compare automatic scheduling with manual overlap under the same store policy."""
+    if op_name != "PagedKVCacheGatherFwdOp" or case.inputs[1].dtype not in (torch.float16, torch.bfloat16):
+        return {}
+    automatic = _Run(case.inputs, stages=2, tile_rows=16, store_l2_cache_ctrl=0)
+    overlap = _Run(case.inputs, stages=1, group_tiles=8, tile_rows=4,
+                   double_buffer=True, store_l2_cache_ctrl=0)
+    return {
+        "tilelang-auto2-store0": Implementation(automatic, args=(), reset=automatic.reset),
+        "tilelang-overlap32-r4-store0": Implementation(overlap, args=(), reset=overlap.reset),
+    }

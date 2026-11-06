@@ -16,7 +16,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--implementation", choices=("manual", "auto2", "simt", "batch2", "batch4", "batch2-db", "batch4-db", "batch16-r4", "overlap32-r4", "gatherv2-core"), required=True)
     parser.add_argument("--store-l2-cache-ctrl", type=int, choices=(0, 4), default=4,
-                        help="batch candidates only: UB-to-GM cache policy")
+                        help="auto2/batch candidates: UB-to-GM cache policy")
     parser.add_argument("--source-dir", type=Path)
     parser.add_argument("--profile-dir", type=Path,
                         help="real-device profiler with automatic analysis; omit for simulator runs")
@@ -74,7 +74,8 @@ def main():
                 store_l2_cache_ctrl=args.store_l2_cache_ctrl)
         else:
             kernel = (AscendPagedKVCacheGatherKernel(call) if args.implementation == "manual"
-                  else AscendPagedKVCacheGatherAutoKernel(call, stages=2, tile_rows=16))
+                  else AscendPagedKVCacheGatherAutoKernel(
+                      call, stages=2, tile_rows=16, store_l2_cache_ctrl=args.store_l2_cache_ctrl))
         if args.source_dir:
             args.source_dir.mkdir(parents=True, exist_ok=True)
             (args.source_dir / f"{args.implementation}.cpp").write_text(

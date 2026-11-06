@@ -277,3 +277,27 @@ python scripts/profile_gather_pipeline.py \
 
 以上为应用命令；simulator 外层命令及预约规则沿用流水 README。
 MTE3 显示轨道数量不等同缓冲区数量或硬件引擎数量，应检查实际轨道标签及读写重叠。
+
+## 当前对照：auto2-store0 与 overlap32-r4-store0
+
+两者均显式使用写出模式 0。auto2 保持原来的 16 行 tile、2 stages、
+编译器自动调度，不新增手工批量地址描述符。overlap 保持两个 32 行区域、
+4 行读入、显式事件。两者是完整调度方案对照，不是只切换单个参数。
+原 auto2 默认仍为模式 4，已有实验标签的含义不变。
+
+只运行下面两个候选，覆盖五种非 FP8 规格：
+
+```bash
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/auto2-store0 \
+  --run-dir "./benchmark-results/auto2-store0-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --case-regex "^(ds-v3-mixed|llama-70b-cp|mla-small|llama-cp-unaligned|mla-b256)-" \
+  --implementation-factory benchmarks.ascend.gather_auto:make_auto2_store0_implementations \
+  --implementations tilelang-auto2-store0 tilelang-overlap32-r4-store0
+```
+
+先追加 `--verify-only`。不会执行默认 tileops、SIMT 或其他实验。
+流水脚本可使用 `--implementation auto2 --store-l2-cache-ctrl 0`，
+配合 `--source-dir` 确认包括尾部路径在内的所有 UB→GM 写出均为 mode 0。
+已扩展 auto 正确性用例验证模式 4/0；本地仅做语法和 diff 检查，设备验证待运行。
