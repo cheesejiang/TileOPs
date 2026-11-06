@@ -14,7 +14,7 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--implementation", choices=("manual", "auto2", "simt", "batch2", "batch4", "batch2-db", "batch4-db", "batch16-r4", "overlap32-r4", "overlap60-r1", "gatherv2-core"), required=True)
+    parser.add_argument("--implementation", choices=("manual", "auto2", "simt", "batch2", "batch4", "batch2-db", "batch4-db", "batch16-r4", "overlap32-r4", "overlap60-r1", "precompute32-r4", "gatherv2-core"), required=True)
     parser.add_argument("--store-l2-cache-ctrl", type=int, choices=(0, 4), default=4,
                         help="auto2/batch candidates: UB-to-GM cache policy")
     parser.add_argument("--source-dir", type=Path)
@@ -62,7 +62,10 @@ def main():
             row_width=width, dtype=torch.bfloat16, out_dtype=torch.bfloat16,
             has_starts=True, device=device,
         )
-        if args.implementation == "simt":
+        if args.implementation == "precompute32-r4":
+            from tileops.kernels.ascend.attention.paged_cache_gather_precompute import AscendPagedKVCacheGatherPrecomputeKernel
+            kernel = AscendPagedKVCacheGatherPrecomputeKernel(call, total_rows=dst.shape[0])
+        elif args.implementation == "simt":
             from tileops.kernels.ascend.attention.paged_cache_gather_simt import AscendPagedKVCacheGatherSimtKernel
             kernel = AscendPagedKVCacheGatherSimtKernel(call)
         elif args.implementation in ("batch2", "batch4", "batch2-db", "batch4-db", "batch16-r4", "overlap32-r4", "overlap60-r1"):

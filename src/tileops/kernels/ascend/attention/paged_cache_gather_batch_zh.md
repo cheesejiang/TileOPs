@@ -358,3 +358,39 @@ python -m pytest tests/ops/test_paged_cache_gather_batch_ascend.py \
 预期更大请求窗口可能改善重叠，但逐行地址计算/发射开销也可能抵消收益。
 此对照同时改变组大小、读入粒度和启动顺序，不能归因于单个变量。
 本地已通过语法和 diff 检查，未完成设备编译/正确性或性能验证。
+
+## 当前候选：每核预计算全部物理行号
+
+`paged_cache_gather_precompute.py` 新增 `tilelang-precompute32-r4-store0`。
+每核先二分找到首行请求，然后遍历其负责的全部行，跳过空请求，按设备上的
+cu/starts/table 计算物理行号并保存在 int64 UB 数组中。全部算完才开始 payload DMA。
+地址计算与搬运在同一个 kernel，均计入耗时，没有 CPU 预计算或外部索引输入。
+
+保持两块 32 行区域、store0。每 4 行检查物理地址是否连续：连续则矩形搬运，
+不连续则逐行搬运，以处理跨页、跨请求及非对齐起点。删除原动态地址/长度/目标
+描述符；搬运阶段仍有连续性判断，但不再读取 GM 页表。
+行号表容量按输出行数和核数编译特化，复用 adapter 时输出行数改变会新建 kernel。
+对于 32768 行、56 核，最大每核 592 行，额外行号表为 4736 字节。
+更大规格需要更多 UB；编译容量与实际收益均需设备验证。
+
+先验证五个非 FP8 manifest 用例及修改元数据后的重复调用：
+
+```bash
+python -m pytest tests/ops/test_paged_cache_gather_precompute_ascend.py --tileops-device=npu -q
+```
+
+只运行原 overlap32 与预计算候选：
+
+```bash
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/precompute \
+  --run-dir "./benchmark-results/precompute-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --case-regex "^(ds-v3-mixed|llama-70b-cp|mla-small|llama-cp-unaligned|mla-b256)-" \
+  --implementation-factory benchmarks.ascend.gather_auto:make_precompute_implementations \
+  --implementations tilelang-overlap32-r4-store0 tilelang-precompute32-r4-store0
+```
+
+先追加 `--verify-only`。流水脚本选择 `--implementation precompute32-r4`，
+该候选固定 store0。重点检查预计算启动成本，以及稳定搬运阶段标量/GM 页表
+依赖是否减少。语法/diff 已检查，本地没有 NPU，尚未验证设备编译和性能。

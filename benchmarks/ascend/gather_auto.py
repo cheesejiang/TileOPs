@@ -12,7 +12,8 @@ from tileops.kernels.attention.paged_cache_gather import PagedKVCacheGatherCall
 class AutoGather:
     """Public-layout adapter; compile on first use, including strided-output staging."""
 
-    def __init__(self, stages=1, tile_rows=16, segmented=False, group_tiles=None, double_buffer=False, simt=False, store_l2_cache_ctrl=4):
+    def __init__(self, stages=1, tile_rows=16, segmented=False, group_tiles=None, double_buffer=False, simt=False, store_l2_cache_ctrl=4, precompute=False):
+        self.precompute = precompute
         self.store_l2_cache_ctrl = store_l2_cache_ctrl
         self.simt = simt
         self.double_buffer = double_buffer
@@ -31,9 +32,13 @@ class AutoGather:
             dtype=cache.dtype, out_dtype=dst.dtype, has_starts=starts is not None,
             device=dst.device,
         )
-        kernel = self.kernels.get(call)
+        cache_key = (call, dst.shape[0]) if self.precompute else call
+        kernel = self.kernels.get(cache_key)
         if kernel is None:
-            if self.simt:
+            if self.precompute:
+                from tileops.kernels.ascend.attention.paged_cache_gather_precompute import AscendPagedKVCacheGatherPrecomputeKernel
+                kernel = AscendPagedKVCacheGatherPrecomputeKernel(call, total_rows=dst.shape[0])
+            elif self.simt:
                 from tileops.kernels.ascend.attention.paged_cache_gather_simt import AscendPagedKVCacheGatherSimtKernel
                 kernel = AscendPagedKVCacheGatherSimtKernel(call)
             elif self.group_tiles is not None:
@@ -43,7 +48,7 @@ class AutoGather:
                 kernel = AscendPagedKVCacheGatherAutoKernel(
                     call, stages=self.stages, tile_rows=self.tile_rows, segmented=self.segmented,
                     store_l2_cache_ctrl=self.store_l2_cache_ctrl)
-            self.kernels[call] = kernel
+            self.kernels[cache_key] = kernel
         output = dst if dst.is_contiguous() else torch.empty_like(dst, memory_format=torch.contiguous_format)
         kernel(output, cache, table.contiguous(), cu.contiguous(),
                starts.contiguous() if starts is not None else None,
@@ -54,14 +59,14 @@ class AutoGather:
 
 
 class _Run:
-    def __init__(self, inputs, stages, tile_rows=16, segmented=False, group_tiles=None, double_buffer=False, simt=False, store_l2_cache_ctrl=4):
+    def __init__(self, inputs, stages, tile_rows=16, segmented=False, group_tiles=None, double_buffer=False, simt=False, store_l2_cache_ctrl=4, precompute=False):
         self.dst = torch.empty_like(inputs[0])
         self.inputs = inputs[1:]
-        self.op = AutoGather(stages, tile_rows, segmented, group_tiles, double_buffer, simt, store_l2_cache_ctrl)
+        self.op = AutoGather(stages, tile_rows, segmented, group_tiles, double_buffer, simt, store_l2_cache_ctrl, precompute)
         self.provenance = {"schedule": "simt-direct" if simt else ("batched" if group_tiles else "automatic"), "stages": stages,
                            "group_tiles": group_tiles, "double_buffer": double_buffer,
                            "tile_rows": tile_rows, "store_l2_cache_ctrl": store_l2_cache_ctrl,
-                           "segmented": segmented,
+                           "segmented": segmented, "precompute": precompute,
                            "experimental": True, "explicit_events": group_tiles is not None}
 
     def __call__(self):
@@ -200,5 +205,18 @@ def make_gatherv2_layout_implementations(op_name, case):
     ):
         run = _Run(case.inputs, stages=1, group_tiles=group_tiles, tile_rows=tile_rows,
                    double_buffer=True, store_l2_cache_ctrl=0)
+        result[name] = Implementation(run, args=(), reset=run.reset)
+    return result
+
+
+def make_precompute_implementations(op_name, case):
+    """Address preparation stays inside the measured kernel in both candidates."""
+    if op_name != "PagedKVCacheGatherFwdOp" or case.inputs[1].dtype not in (torch.float16, torch.bfloat16):
+        return {}
+    result = {}
+    for name, precompute in (("tilelang-overlap32-r4-store0", False),
+                             ("tilelang-precompute32-r4-store0", True)):
+        run = _Run(case.inputs, stages=1, group_tiles=8, tile_rows=4,
+                   double_buffer=True, store_l2_cache_ctrl=0, precompute=precompute)
         result[name] = Implementation(run, args=(), reset=run.reset)
     return result
