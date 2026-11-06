@@ -28,9 +28,8 @@ def main():
     import torch
     import torch_npu  # noqa: F401
 
-    from tileops.kernels.ascend.attention.paged_cache_gather import (
-        AscendPagedKVCacheGatherKernel, AscendPagedKVCacheGatherManualKernel,
-    )
+    from tileops.kernels.ascend.attention.paged_cache_gather import AscendPagedKVCacheGatherKernel
+    from tileops.kernels.ascend.attention.paged_cache_gather_manual import AscendPagedKVCacheGatherManualKernel
     from tileops.kernels.ascend.attention.paged_cache_gather_auto import AscendPagedKVCacheGatherAutoKernel
     from tileops.kernels.attention.paged_cache_gather import PagedKVCacheGatherCall
 
