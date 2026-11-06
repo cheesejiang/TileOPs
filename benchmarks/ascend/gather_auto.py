@@ -40,6 +40,9 @@ class AutoGather:
                 kernel = AscendPagedKVCacheGatherPrecomputeKernel(
                     call, total_rows=dst.shape[0], group_rows=self.group_tiles * self.tile_rows,
                     tile_rows=self.tile_rows)
+            elif self.simt == "rows":
+                from tileops.kernels.ascend.attention.paged_cache_gather_simt_rows import AscendPagedKVCacheGatherSimtRowsKernel
+                kernel = AscendPagedKVCacheGatherSimtRowsKernel(call)
             elif self.simt:
                 from tileops.kernels.ascend.attention.paged_cache_gather_simt import AscendPagedKVCacheGatherSimtKernel
                 kernel = AscendPagedKVCacheGatherSimtKernel(call)
@@ -68,7 +71,7 @@ class _Run:
         self.provenance = {"schedule": "simt-direct" if simt else ("batched" if group_tiles else "automatic"), "stages": stages,
                            "group_tiles": group_tiles, "double_buffer": double_buffer,
                            "tile_rows": tile_rows, "store_l2_cache_ctrl": store_l2_cache_ctrl,
-                           "segmented": segmented, "precompute": precompute,
+                           "segmented": segmented, "precompute": precompute, "simt_variant": simt,
                            "experimental": True, "explicit_events": group_tiles is not None}
 
     def __call__(self):
@@ -237,4 +240,15 @@ def make_precompute_four_implementations(op_name, case):
                        tile_rows=tile_rows, double_buffer=True, store_l2_cache_ctrl=0,
                        precompute=precompute)
             result[name] = Implementation(run, args=(), reset=run.reset)
+    return result
+
+
+def make_simt_rows_implementations(op_name, case):
+    """All seven cases: optimized row-address SIMT versus auto2-store0 only."""
+    if op_name != "PagedKVCacheGatherFwdOp":
+        return {}
+    result = {}
+    for name, simt in (("tilelang-auto2-store0", False), ("tilelang-simt-rows", "rows")):
+        run = _Run(case.inputs, stages=2, simt=simt, store_l2_cache_ctrl=0)
+        result[name] = Implementation(run, args=(), reset=run.reset)
     return result

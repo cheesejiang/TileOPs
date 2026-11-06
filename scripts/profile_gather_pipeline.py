@@ -14,7 +14,7 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--implementation", choices=("pagecache", "unified", "manual", "auto2", "simt", "batch2", "batch4", "batch2-db", "batch4-db", "batch16-r4", "overlap32-r4", "overlap60-r1", "precompute32-r4", "precompute60-r1", "gatherv2-core"), required=True)
+    parser.add_argument("--implementation", choices=("pagecache", "unified", "manual", "auto2", "simt", "simt-rows", "batch2", "batch4", "batch2-db", "batch4-db", "batch16-r4", "overlap32-r4", "overlap60-r1", "precompute32-r4", "precompute60-r1", "gatherv2-core"), required=True)
     parser.add_argument("--store-l2-cache-ctrl", type=int, choices=(0, 4), default=4,
                         help="auto2/batch candidates: UB-to-GM cache policy")
     parser.add_argument("--source-dir", type=Path)
@@ -75,6 +75,9 @@ def main():
                 call, total_rows=dst.shape[0],
                 group_rows=60 if args.implementation == "precompute60-r1" else 32,
                 tile_rows=1 if args.implementation == "precompute60-r1" else 4)
+        elif args.implementation == "simt-rows":
+            from tileops.kernels.ascend.attention.paged_cache_gather_simt_rows import AscendPagedKVCacheGatherSimtRowsKernel
+            kernel = AscendPagedKVCacheGatherSimtRowsKernel(call)
         elif args.implementation == "simt":
             from tileops.kernels.ascend.attention.paged_cache_gather_simt import AscendPagedKVCacheGatherSimtKernel
             kernel = AscendPagedKVCacheGatherSimtKernel(call)

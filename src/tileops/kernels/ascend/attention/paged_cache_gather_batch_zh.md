@@ -592,3 +592,35 @@ python scripts/benchmark_ascend.py \
 g60 的 Llama payload 为240KiB，另需描述符和元数据；FP8行宽576的输入及
 输出payload合计202.5KiB。最终资源分配须设备编译确认。
 本地无 davinci 设备，不能在本机完成 NPU 性能测量。
+
+## SIMT 优化版：逐行映射＋显式连续线程地址
+
+旧版 `tilelang-simt` 保留；新版本在 `paged_cache_gather_simt_rows.py`，
+标签为 `tilelang-simt-rows`，不改变公共默认实现。
+每32行一块：先把cu/starts/scale缓存到UB，第一段SIMT每行只计算一次物理行号；
+第二段SIMT用256线程、相邻32线程负责同一行相邻列，行号在列循环外读取。
+GM页表查询次数从“每输出元素一次”减少到“每输出行一次”。
+FP8反量化在写出时完成，支持全部七规格。两段VF间及元数据复用依赖由自动调度处理。
+这仍是SIMT直接GM读写，不是DMA payload流水，缓存策略参数不等同T.copy的store0。
+直接GM指令吞吐、两次VF调用及UB行号交换仍可能限制性能，不能预先保证赶上DMA。
+
+先验证七规格及修改页表/起点/scale后的重放：
+
+```bash
+python -m pytest tests/ops/test_paged_cache_gather_simt_rows_ascend.py --tileops-device=npu -q
+```
+
+只测优化SIMT与auto2-store0，全部七规格，不需要case筛选或其他工厂：
+
+```bash
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/simt-rows --timeout 7200 \
+  --run-dir "./benchmark-results/simt-rows-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --implementation-factory benchmarks.ascend.gather_auto:make_simt_rows_implementations \
+  --implementations tilelang-auto2-store0 tilelang-simt-rows
+```
+
+先加 `--verify-only`，通过后测性能；该工厂明确对FP8也提供auto2-store0。
+流水应用选择 `--implementation simt-rows`，可导出生成代码检查线程映射。
+本地语法、diff和线程覆盖模型检查通过；没有NPU，尚未设备编译或计时。
