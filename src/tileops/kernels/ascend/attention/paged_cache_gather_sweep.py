@@ -1,6 +1,7 @@
 """Parameterized overlap schedule for FP16/BF16 and scaled FP8 gather.
 
-Not registered as the public default. One or two payload buffers, explicit per-buffer events.
+Public NPU kernel uses g32-r8-store0; other dimensions remain explicit experiments.
+Two payload regions, explicit per-region events.
 """
 
 import functools

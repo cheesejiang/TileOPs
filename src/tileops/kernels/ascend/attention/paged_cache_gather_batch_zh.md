@@ -1,3 +1,38 @@
+# 当前公共实现：统一 g32-r8-store0
+
+七个 manifest 规格统一使用：每区域32行、每次最多读8行、两个区域交替、
+写出模式0。不按规格选择参数，不做整核地址预计算。跨请求、跨页、尾部
+仍按实际元数据拆分；FP8转换和scale乘法也在同一个kernel内。
+
+公共 Op 的 Ascend 注册类仍为 `AscendPagedKVCacheGatherKernel`，构造时
+调用 `paged_cache_gather_sweep.py` 的固定32/8编译配置，host检查/原地dst
+和非连续输出staging沿用原实现。默认benchmark不再需要implementation factory。
+历史 `manual` 流水入口保留旧算法，新默认流水入口为 `--implementation unified`。
+
+先在服务器重新验证公共路径（包括连续与非连续输出）：
+
+```bash
+python -m pytest tests/ops/test_paged_cache_gather_ascend.py --tileops-device=npu -q
+```
+
+只测统一后的公共实现，覆盖全部七规格：
+
+```bash
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/unified --timeout 7200 \
+  --run-dir "./benchmark-results/gather-unified-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --implementations tileops
+```
+
+可先加 `--verify-only`。历史参数实验入口保留，但不由上述命令执行。
+旧的 `tileops` 测量对应此前实现，比较时必须记录源码版本，不能混作同一算法。
+本次路由修改本地仅完成静态检查；已测参数的数据不替代新公共路径的设备验证。
+
+以下为历史实验记录，按时间追加，参数名称以对应章节为准。
+
+---
+
 # 分组地址准备与搬运候选
 
 `paged_cache_gather_batch.py` 新增 batch2/batch4，不注册为默认实现，不改变公共 Op。

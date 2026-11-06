@@ -161,10 +161,14 @@ class AscendPagedKVCacheGatherKernel(Kernel, PagedKVCacheGatherFwdInterface):
         super().__init__(device_index=call.device.index if call.device is not None else None)
         self.call = call
         self.dtype = call.dtype
-        self._compiled = _compile(
+        # Lazy import: experimental schedules inherit this class's launch checks.
+        # Keep the registered public class stable, unify its device schedule.
+        from tileops.kernels.ascend.attention.paged_cache_gather_sweep import _compile as compile_overlap
+
+        self._compiled = compile_overlap(
             call.batch, call.num_pages, call.page_size, call.table_width, call.row_width,
-            self.dtype_str, self.dtype_to_str(call.out_dtype), call.has_starts,
-            _vector_cores(self.device_index),
+            self.dtype_str, call.has_starts, _vector_cores(self.device_index),
+            32, 8, self.dtype_to_str(call.out_dtype),
         )
 
     def forward(self, dst, cache, block_table, cu_seq_lens, seq_starts=None, scale=None):
@@ -201,6 +205,22 @@ class AscendPagedKVCacheGatherKernel(Kernel, PagedKVCacheGatherFwdInterface):
                        cu_seq_lens, seq_starts if c.has_starts else cu_seq_lens,
                        scale if scale is not None else flat_cache)
         return None
+
+
+class AscendPagedKVCacheGatherManualKernel(AscendPagedKVCacheGatherKernel):
+    """Historical manual schedule, unregistered, for explicit profiling only."""
+
+    def __init__(self, call):
+        reason = self.refusal(call)
+        if reason:
+            raise ValueError(reason)
+        Kernel.__init__(self, device_index=call.device.index if call.device is not None else None)
+        self.call, self.dtype = call, call.dtype
+        self._compiled = _compile(
+            call.batch, call.num_pages, call.page_size, call.table_width, call.row_width,
+            self.dtype_str, self.dtype_to_str(call.out_dtype), call.has_starts,
+            _vector_cores(self.device_index),
+        )
 
 
 register_kernel_type("PagedKVCacheGatherFwdOp", "ascend", AscendPagedKVCacheGatherKernel)

@@ -14,7 +14,7 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--implementation", choices=("manual", "auto2", "simt", "batch2", "batch4", "batch2-db", "batch4-db", "batch16-r4", "overlap32-r4", "overlap60-r1", "precompute32-r4", "precompute60-r1", "gatherv2-core"), required=True)
+    parser.add_argument("--implementation", choices=("unified", "manual", "auto2", "simt", "batch2", "batch4", "batch2-db", "batch4-db", "batch16-r4", "overlap32-r4", "overlap60-r1", "precompute32-r4", "precompute60-r1", "gatherv2-core"), required=True)
     parser.add_argument("--store-l2-cache-ctrl", type=int, choices=(0, 4), default=4,
                         help="auto2/batch candidates: UB-to-GM cache policy")
     parser.add_argument("--source-dir", type=Path)
@@ -28,7 +28,9 @@ def main():
     import torch
     import torch_npu  # noqa: F401
 
-    from tileops.kernels.ascend.attention.paged_cache_gather import AscendPagedKVCacheGatherKernel
+    from tileops.kernels.ascend.attention.paged_cache_gather import (
+        AscendPagedKVCacheGatherKernel, AscendPagedKVCacheGatherManualKernel,
+    )
     from tileops.kernels.ascend.attention.paged_cache_gather_auto import AscendPagedKVCacheGatherAutoKernel
     from tileops.kernels.attention.paged_cache_gather import PagedKVCacheGatherCall
 
@@ -62,7 +64,9 @@ def main():
             row_width=width, dtype=torch.bfloat16, out_dtype=torch.bfloat16,
             has_starts=True, device=device,
         )
-        if args.implementation in ("precompute32-r4", "precompute60-r1"):
+        if args.implementation == "unified":
+            kernel = AscendPagedKVCacheGatherKernel(call)
+        elif args.implementation in ("precompute32-r4", "precompute60-r1"):
             from tileops.kernels.ascend.attention.paged_cache_gather_precompute import AscendPagedKVCacheGatherPrecomputeKernel
             kernel = AscendPagedKVCacheGatherPrecomputeKernel(
                 call, total_rows=dst.shape[0],
@@ -79,7 +83,7 @@ def main():
                 double_buffer=args.implementation.endswith("-db") or args.implementation in ("overlap32-r4", "overlap60-r1"),
                 store_l2_cache_ctrl=args.store_l2_cache_ctrl)
         else:
-            kernel = (AscendPagedKVCacheGatherKernel(call) if args.implementation == "manual"
+            kernel = (AscendPagedKVCacheGatherManualKernel(call) if args.implementation == "manual"
                   else AscendPagedKVCacheGatherAutoKernel(
                       call, stages=2, tile_rows=16, store_l2_cache_ctrl=args.store_l2_cache_ctrl))
         if args.source_dir:
