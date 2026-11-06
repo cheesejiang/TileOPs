@@ -236,3 +236,44 @@ python scripts/benchmark_ascend.py \
 同时记录单次 64 KiB 写出的起止周期及对应整组读入跨度。
 附件提供了寄存器和源码，没有时长字段；尚不能计算真实搬运耗时。
 本地无 NPU，已通过语法/diff 检查，未进行设备编译或性能验证。
+
+## 当前对照：store0 下的单缓冲与双缓冲
+
+| 实现 | UB 区域 | 每次读入 | 每次完整写出 | 写出模式 |
+| --- | --- | --- | --- | --- |
+| `tilelang-batch16-r4-store0` | 单区域 64 行 | 4 行 | 64 行 | 0 |
+| `tilelang-overlap32-r4-store0` | 两区域，各 32 行 | 4 行 | 32 行 | 0 |
+
+两者 payload 总容量相同：BF16、行宽 1024 时为 128 KiB。
+该对照同时改变区域轮转和单次写出粒度，用于选择整体调度；不能把全部差值
+单独归因为双缓冲。上一轮 store4/store0 实验两者都开了双缓冲。
+
+只执行并汇总这两个候选：
+
+```bash
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/store0-overlap \
+  --run-dir "./benchmark-results/store0-overlap-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --case-regex "^(ds-v3-mixed|llama-70b-cp|mla-small|llama-cp-unaligned|mla-b256)-" \
+  --implementation-factory benchmarks.ascend.gather_auto:make_store0_overlap_implementations \
+  --implementations tilelang-batch16-r4-store0 tilelang-overlap32-r4-store0
+```
+
+先加 `--verify-only` 验证；去掉后测性能。不运行公共 tileops、SIMT 或其他实验。
+独立数值参考仍用于正确性校验。
+
+流水采集分别使用下面两个选择，均显式设置模式 0：
+
+```bash
+python scripts/profile_gather_pipeline.py \
+  --implementation batch16-r4 --store-l2-cache-ctrl 0 \
+  --source-dir ./pipeline-results/single-store0-source --check
+
+python scripts/profile_gather_pipeline.py \
+  --implementation overlap32-r4 --store-l2-cache-ctrl 0 \
+  --source-dir ./pipeline-results/overlap-store0-source --check
+```
+
+以上为应用命令；simulator 外层命令及预约规则沿用流水 README。
+MTE3 显示轨道数量不等同缓冲区数量或硬件引擎数量，应检查实际轨道标签及读写重叠。

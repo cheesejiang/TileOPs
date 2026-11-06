@@ -158,3 +158,18 @@ def make_store_policy_implementations(op_name, case):
         name = f"tilelang-overlap32-r4-store{mode}"
         result[name] = Implementation(run, args=(), reset=run.reset)
     return result
+
+
+def make_store0_overlap_implementations(op_name, case):
+    """Compare single 64-row and alternating 32-row regions, both store mode 0."""
+    if op_name != "PagedKVCacheGatherFwdOp" or case.inputs[1].dtype not in (torch.float16, torch.bfloat16):
+        return {}
+    result = {}
+    for name, group_tiles, double_buffer in (
+        ("tilelang-batch16-r4-store0", 16, False),
+        ("tilelang-overlap32-r4-store0", 8, True),
+    ):
+        run = _Run(case.inputs, stages=1, group_tiles=group_tiles, tile_rows=4,
+                   double_buffer=double_buffer, store_l2_cache_ctrl=0)
+        result[name] = Implementation(run, args=(), reset=run.reset)
+    return result
