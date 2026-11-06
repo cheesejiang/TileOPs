@@ -51,7 +51,7 @@ class _Run:
 def make_implementations(op_name, case):
     if op_name != 'PagedKVCacheGatherFwdOp':
         return {}
-    groups = _selection('TILEOPS_GATHER_GROUP_ROWS', '16,32,48', {16,32,48,64})
+    groups = _selection('TILEOPS_GATHER_GROUP_ROWS', '16,32,48', {16,32,48,60,64})
     loads = _selection('TILEOPS_GATHER_LOAD_ROWS', '1,2,4,8,16', {1,2,4,8,16})
     result = {}
     for group in groups:

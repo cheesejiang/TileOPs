@@ -178,7 +178,7 @@ class AscendPagedKVCacheGatherSweepKernel(AscendPagedKVCacheGatherKernel):
         reason = self.refusal(call)
         if reason:
             raise ValueError(reason)
-        if group_rows not in (16, 32, 48, 64) or tile_rows not in (1, 2, 4, 8, 16):
+        if group_rows not in (16, 32, 48, 60, 64) or tile_rows not in (1, 2, 4, 8, 16):
             raise ValueError("unsupported sweep dimensions")
         if group_rows % tile_rows:
             raise ValueError("group_rows must be divisible by tile_rows")

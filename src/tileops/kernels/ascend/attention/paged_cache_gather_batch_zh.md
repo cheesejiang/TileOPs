@@ -482,3 +482,37 @@ python -m pytest tests/ops/test_paged_cache_gather_sweep_ascend.py --tileops-dev
 已完成本地语法、diff 及事件配对模型检查；无 NPU，尚未验证设备编译、数值
 或性能，必须先验证再引用结果。FP8 与 BF16 的UB布局和转换工作不同，
 只能在同一规格内比较各组合。
+
+## 当前测试：g60-r4 与 g48-r4，七规格
+
+g60 已加入 sweep，以下只改变区域行数，读入均为 4 行、store0、双区域、
+overlap32 的启动顺序，不做地址预计算。不同于之前启动预取两组的 overlap60-r1。
+覆盖七规格、两个组合，共14条结果；g60/4=15次完整片段读入（边界可能再拆分）。
+先验证：
+
+```bash
+export TILEOPS_GATHER_GROUP_ROWS=48,60
+export TILEOPS_GATHER_LOAD_ROWS=4
+
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/g60-verify --timeout 7200 \
+  --run-dir "./benchmark-results/g60-verify-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp --verify-only \
+  --implementation-factory benchmarks.ascend.gather_sweep:make_implementations \
+  --implementations tilelang-sweep-g48-r4-store0 tilelang-sweep-g60-r4-store0
+```
+
+正确性通过后测性能（沿用上面两个 export）：
+
+```bash
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/g60 --timeout 7200 \
+  --run-dir "./benchmark-results/g60-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --implementation-factory benchmarks.ascend.gather_sweep:make_implementations \
+  --implementations tilelang-sweep-g48-r4-store0 tilelang-sweep-g60-r4-store0
+```
+
+g60 的 Llama payload 为240KiB，另需描述符和元数据；FP8行宽576的输入及
+输出payload合计202.5KiB。最终资源分配须设备编译确认。
+本地无 davinci 设备，不能在本机完成 NPU 性能测量。

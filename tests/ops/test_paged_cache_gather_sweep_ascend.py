@@ -12,8 +12,9 @@ from workloads.device import run_device, run_device_available
 
 @pytest.mark.smoke
 @pytest.mark.parametrize("case", _cases(), ids=lambda c: c.case_id)
-@pytest.mark.parametrize("group_rows", [16, 32, 48])
-@pytest.mark.parametrize("load_rows", [1, 2, 4, 8, 16])
+@pytest.mark.parametrize("group_rows,load_rows",
+    [(g, r) for g in (16, 32, 48) for r in (1, 2, 4, 8, 16)]
+    + [pytest.param(60, 4, id="g60-r4")])
 def test_sweep_manifest(case, group_rows, load_rows):
     if torch.device(run_device()).type != "npu" or not run_device_available():
         pytest.skip("requires Ascend and --tileops-device=npu")
