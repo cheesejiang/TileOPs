@@ -14,7 +14,7 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--implementation", choices=("unified", "manual", "auto2", "simt", "batch2", "batch4", "batch2-db", "batch4-db", "batch16-r4", "overlap32-r4", "overlap60-r1", "precompute32-r4", "precompute60-r1", "gatherv2-core"), required=True)
+    parser.add_argument("--implementation", choices=("pagecache", "unified", "manual", "auto2", "simt", "batch2", "batch4", "batch2-db", "batch4-db", "batch16-r4", "overlap32-r4", "overlap60-r1", "precompute32-r4", "precompute60-r1", "gatherv2-core"), required=True)
     parser.add_argument("--store-l2-cache-ctrl", type=int, choices=(0, 4), default=4,
                         help="auto2/batch candidates: UB-to-GM cache policy")
     parser.add_argument("--source-dir", type=Path)
@@ -64,7 +64,10 @@ def main():
             row_width=width, dtype=torch.bfloat16, out_dtype=torch.bfloat16,
             has_starts=True, device=device,
         )
-        if args.implementation == "unified":
+        if args.implementation == "pagecache":
+            from tileops.kernels.ascend.attention.paged_cache_gather_sweep import AscendPagedKVCacheGatherSweepKernel
+            kernel = AscendPagedKVCacheGatherSweepKernel(call, group_rows=32, tile_rows=8, cache_page=True)
+        elif args.implementation == "unified":
             kernel = AscendPagedKVCacheGatherKernel(call)
         elif args.implementation in ("precompute32-r4", "precompute60-r1"):
             from tileops.kernels.ascend.attention.paged_cache_gather_precompute import AscendPagedKVCacheGatherPrecomputeKernel

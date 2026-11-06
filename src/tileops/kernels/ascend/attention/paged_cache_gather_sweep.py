@@ -17,7 +17,7 @@ from tileops.kernels.kernel_base import Kernel
 
 
 @functools.lru_cache(maxsize=64)
-def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks, group_rows, tile_rows, out_dtype):
+def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks, group_rows, tile_rows, out_dtype, cache_page=False):
     buffers = 2
     quantized = dtype == "float8_e4m3fn"
     ready_event = "V_MTE3" if quantized else "MTE2_MTE3"
@@ -58,6 +58,10 @@ def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks,
             tiles_per_core = T.ceildiv(T.ceildiv(total, 16), blocks)
             first = bx * tiles_per_core * 16
             end = T.min(total, (bx + 1) * tiles_per_core * 16)
+            # Per-invocation scalar cache; both request and logical page are keys.
+            cached_request = T.alloc_var("int32", init=-1)
+            cached_page = T.alloc_var("int32", init=-1)
+            cached_physical = T.alloc_var("int32", init=0)
             request = T.alloc_var("int32", init=0)
             lo = T.alloc_var("int32", init=0)
             hi = T.alloc_var("int32", init=batch)
@@ -105,9 +109,17 @@ def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks,
                                 offsets[request + 1] - row - prepared,
                                 page_size - pos % page_size)),
                         )
-                        addresses[segments] = T.cast(
-                            table[request, pos // page_size], "int64"
-                        ) * page_size + pos % page_size
+                        if cache_page:
+                            logical_page = pos // page_size
+                            if request != cached_request or logical_page != cached_page:
+                                cached_physical = table[request, logical_page]
+                                cached_request = request
+                                cached_page = logical_page
+                            addresses[segments] = T.cast(cached_physical, "int64") * page_size + pos % page_size
+                        else:
+                            addresses[segments] = T.cast(
+                                table[request, pos // page_size], "int64"
+                            ) * page_size + pos % page_size
                         lengths[segments] = count
                         destinations[segments] = prepared
                         prepared = prepared + count
@@ -175,7 +187,7 @@ def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks,
 class AscendPagedKVCacheGatherSweepKernel(AscendPagedKVCacheGatherKernel):
     """Inherit the public launch checks; replace only the compiled schedule."""
 
-    def __init__(self, call, group_rows=32, tile_rows=4):
+    def __init__(self, call, group_rows=32, tile_rows=4, cache_page=False):
         reason = self.refusal(call)
         if reason:
             raise ValueError(reason)
@@ -188,5 +200,5 @@ class AscendPagedKVCacheGatherSweepKernel(AscendPagedKVCacheGatherKernel):
         self._compiled = _compile(
             call.batch, call.num_pages, call.page_size, call.table_width, call.row_width,
             self.dtype_str, call.has_starts, _vector_cores(self.device_index),
-            group_rows, tile_rows, self.dtype_to_str(call.out_dtype),
+            group_rows, tile_rows, self.dtype_to_str(call.out_dtype), cache_page,
         )

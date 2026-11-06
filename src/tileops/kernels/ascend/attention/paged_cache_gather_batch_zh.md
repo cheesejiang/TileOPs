@@ -29,6 +29,47 @@ python scripts/benchmark_ascend.py \
 旧的 `tileops` 测量对应此前实现，比较时必须记录源码版本，不能混作同一算法。
 本次路由修改本地仅完成静态检查；已测参数的数据不替代新公共路径的设备验证。
 
+## 下一步对照：同页复用页表项，七规格
+
+公共默认仍是无页号缓存的 g32-r8-store0。本实验只增加每核标量缓存：
+请求号、逻辑页号、物理页号。换请求或逻辑页时读取 block_table，否则复用。
+每次 kernel 调用初始化为无效键，不跨调用保留，因此每次页表更新仍生效。
+缓存可跨同核相邻组复用，不集中计算全部地址；双区域、读写粒度、启动顺序、
+store0、FP8转换及描述符算法保持不变。预期同页复用可减少GM页表访问，
+额外判断也有成本，结果需实测。
+
+独立正确性测试覆盖七规格的有/无缓存版本、页表修改后的重放，以及空请求、
+跨请求同逻辑页号、非对齐起点和尾部：
+
+```bash
+python -m pytest tests/ops/test_paged_cache_gather_pagecache_ascend.py --tileops-device=npu -q
+```
+
+下面只执行两种方法，覆盖全部七规格（共14条结果），不受之前 sweep 环境变量影响：
+
+```bash
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/pagecache --timeout 7200 \
+  --run-dir "./benchmark-results/pagecache-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --implementation-factory benchmarks.ascend.gather_sweep:make_page_cache_implementations \
+  --implementations tilelang-g32-r8-store0 tilelang-g32-r8-store0-pagecache
+```
+
+先在末尾加 `--verify-only`；正确性通过再去掉测性能。两者均由同一kernel模板
+编译，只改变 `cache_page=False/True`，不执行默认tileops或历史实验。
+
+流水应用命令：
+
+```bash
+python scripts/profile_gather_pipeline.py \
+  --implementation pagecache --source-dir ./pipeline-results/pagecache-source --check
+```
+
+基线选择 `--implementation unified`。两者固定store0；simulator外层命令沿用
+流水README，单独输出目录。检查生成代码中table读取是否位于缓存失效判断内。
+本地仅语法/diff和CPU launcher回归通过，NPU编译、正确性及性能待设备验证。
+
 以下为历史实验记录，按时间追加，参数名称以对应章节为准。
 
 ---

@@ -21,7 +21,7 @@ def _selection(variable, default, allowed):
 
 
 class _Run:
-    def __init__(self, inputs, group_rows, load_rows):
+    def __init__(self, inputs, group_rows, load_rows, cache_page=False):
         dst, cache, table, cu, starts, scale = inputs
         self.dst = torch.empty_like(dst, memory_format=torch.contiguous_format)
         self.inputs = inputs[1:]
@@ -34,13 +34,14 @@ class _Run:
         # Compile lazily, inside verification, so errors are recorded by runner.
         self.call, self.kernel = call, None
         self.group_rows, self.load_rows = group_rows, load_rows
+        self.cache_page = cache_page
         self.provenance = dict(schedule='overlap-sweep', group_rows=group_rows,
                                load_rows=load_rows, buffers=2, store_l2_cache_ctrl=0,
-                               precompute=False, experimental=True)
+                               precompute=False, cache_page=cache_page, experimental=True)
 
     def __call__(self):
         if self.kernel is None:
-            self.kernel = AscendPagedKVCacheGatherSweepKernel(self.call, self.group_rows, self.load_rows)
+            self.kernel = AscendPagedKVCacheGatherSweepKernel(self.call, self.group_rows, self.load_rows, cache_page=self.cache_page)
         self.kernel(self.dst, *self.inputs)
         return self.dst
 
@@ -60,4 +61,16 @@ def make_implementations(op_name, case):
                 raise ValueError('group rows must be divisible by load rows')
             run = _Run(case.inputs, group, load)
             result[f'tilelang-sweep-g{group}-r{load}-store0'] = Implementation(run, args=(), reset=run.reset)
+    return result
+
+
+def make_page_cache_implementations(op_name, case):
+    """All seven cases: fixed g32-r8-store0, changing only page-table reuse."""
+    if op_name != 'PagedKVCacheGatherFwdOp':
+        return {}
+    result = {}
+    for enabled in (False, True):
+        name = 'tilelang-g32-r8-store0-pagecache' if enabled else 'tilelang-g32-r8-store0'
+        run = _Run(case.inputs, 32, 8, cache_page=enabled)
+        result[name] = Implementation(run, args=(), reset=run.reset)
     return result
