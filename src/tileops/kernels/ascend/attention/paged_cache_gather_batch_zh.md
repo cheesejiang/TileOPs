@@ -624,3 +624,63 @@ python scripts/benchmark_ascend.py \
 先加 `--verify-only`，通过后测性能；该工厂明确对FP8也提供auto2-store0。
 流水应用选择 `--implementation simt-rows`，可导出生成代码检查线程映射。
 本地语法、diff和线程覆盖模型检查通过；没有NPU，尚未设备编译或计时。
+
+## 最终同轮对照：TileOPs 与 ops-nn / vllm-ascend
+
+专用工厂 `benchmarks.ascend.gather_final_baselines:make_implementations`，
+每个规格返回一个对应基线，runner 自动加入当前公共 `tileops`：
+
+| 规格 | 基线标签 | 工作范围 |
+| --- | --- | --- |
+| 五个 FP16/BF16 规格 | `ops-nn-gatherv2-full` | 设备生成物理行索引，再 ACLNN GatherV2 写入私有 dst |
+| 两个 FP8 规格 | `vllm-ascend-fp8-full` | 沿用交付包路线：CPU逐次计算物理索引、上传，整 cache 转FP32并clone，Triton state-copy，Triton scale乘法，转目标dtype并copy到私有dst |
+
+重要：ops-nn基线是“PyTorch设备索引准备＋Ascend C GatherV2”的组合；
+FP8 vllm路线是Triton，不是Ascend C。该同轮对照不能全部称为纯Ascend C对照。
+不使用预计算索引的 core 代替完整输入语义，所有方法通过原workload独立参考验证。
+vllm基线包含额外dst.copy_以匹配公共写回接口，与交付包返回新tensor的工作量有差别。
+
+运行环境准备（在服务器使用实际存在的路径）：
+
+```bash
+export OPS_NN_OPAPI_LIBRARY=/home/CANN/9.3.0.weekly.20260916/cann-9.3.0/x86_64-linux/lib64/libopapi_nn.so
+export OPS_NN_TENSOR_LIBRARY=/home/CANN/9.3.0.weekly.20260916/cann-9.3.0/x86_64-linux/lib64/libnnopbase.so
+# 使用已安装且可导入的 vllm/vllm_ascend、Ascend Triton；从checkout导入时设置：
+export VLLM_ASCEND_ROOT=/实际位置/vllm-ascend
+```
+
+VLLM_ASCEND_ROOT必须包含vllm_ascend/，可用完整checkout；该选项不安装依赖。
+需要vllm.triton_utils、Ascend Triton及vllm_ascend相关依赖能正常导入。
+不自动替换其他kernel，不使用缺失依赖的回退；错误记录在results.jsonl。
+导入和运行NPU代码均在guard取得设备之后，切勿在未预约的共享卡上手动探测。
+
+先验证全部七规格，只运行当前公共实现和每个规格的一条基线：
+
+```bash
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/final-baselines --timeout 7200 \
+  --run-dir "./benchmark-results/final-baselines-verify-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp --verify-only \
+  --implementation-factory benchmarks.ascend.gather_final_baselines:make_implementations
+```
+
+通过后测性能：
+
+```bash
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/final-baselines --timeout 7200 \
+  --run-dir "./benchmark-results/final-baselines-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --implementation-factory benchmarks.ascend.gather_final_baselines:make_implementations
+```
+
+不加--implementations固定白名单，因为各规格的基线标签不同。专用工厂只添加
+一个基线，因此七规格共14条结果，没有auto2/SIMT/sweep实验。
+summary.md保存在run-dir。当前协议统计捕获的设备执行区间，并非端到端时间；
+vllm的CPU物理索引计算/scale.item主机等待不作为CPU耗时加入，上传/复制如何
+出现在报告中以profiler实际捕获任务为准。设备类型转换、clone、gather、scale、
+输出转换/copy均在调用内，不将其主动移出计时。不能据此直接复现旧表数字。
+
+基线来源路径和哈希写入provenance；vllm记录两个原生模块的源码SHA256，
+并不等同完整部署环境取证。本地无NPU/CANN/Ascend Triton环境，已做语法与
+工厂路由检查，未编译或执行设备性能测量。
