@@ -206,3 +206,33 @@ python -m pytest tests/ops/test_paged_cache_gather_batch_ascend.py \
 重点查看：上一组 ub2gm 是否在本组地址准备及 gm2ub 之前提交，两个区域的
 release 等待是否只发生在复用之前。相邻组地址不重叠不代表硬件一定并行。
 本地没有 NPU，仅完成语法、diff 和事件配对模型检查。
+
+## 写出缓存策略 4/0 对照
+
+本地 TileLang 源码核查结果：
+
+- `tilelang/src/ascend/op/copy.cc` 的 `kStoreDefaultL2CacheCtrl` 为 4。
+- `tilelang/tilelang/ascend/language/copy_op.py` 中 Store 的 4 对应
+  `NOTALLOC_CI`，0 对应 `NORMAL_FV`。
+- 本地 GatherV2 `gather_v2_simd.h::CopyOut` 使用 `DataCopyPad`，未显式设置
+  L2 策略；仅凭此处不能确认 SDK 的最终默认值或已安装二进制的实际策略。
+
+增加仅改变写出缓存模式的实验。两者均为 overlap32-r4，读入策略、
+UB 布局、事件顺序和搬运大小一致。模式 0 不保证更快，不能把结果预先归因于缓存。
+
+```bash
+python scripts/benchmark_ascend.py \
+  --device 3 --unlocked --owner gather/store-policy \
+  --run-dir "./benchmark-results/store-policy-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --case-regex "^(ds-v3-mixed|llama-70b-cp|mla-small|llama-cp-unaligned|mla-b256)-" \
+  --implementation-factory benchmarks.ascend.gather_auto:make_store_policy_implementations \
+  --implementations tilelang-overlap32-r4-store4 tilelang-overlap32-r4-store0
+```
+
+先追加 `--verify-only`。不运行其他候选。流水脚本用
+`--implementation overlap32-r4 --store-l2-cache-ctrl 0`（对照为 4），
+导出代码确认所有 `asc_copy_ub2gm_align` 的 mode 为指定值，
+同时记录单次 64 KiB 写出的起止周期及对应整组读入跨度。
+附件提供了寄存器和源码，没有时长字段；尚不能计算真实搬运耗时。
+本地无 NPU，已通过语法/diff 检查，未进行设备编译或性能验证。

@@ -16,7 +16,7 @@ from tileops.kernels.kernel_base import Kernel
 
 
 @functools.lru_cache(maxsize=64)
-def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks, group_tiles, double_buffer, tile_rows):
+def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks, group_tiles, double_buffer, tile_rows, store_l2_cache_ctrl):
     group_rows = tile_rows * group_tiles
     buffers = 2 if double_buffer else 1
     total = T.dynamic("total")
@@ -75,7 +75,7 @@ def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks,
                                 if (group - 1) % buffers == slot:
                                     T.ascend_wait_flag("MTE2_MTE3", slot)
                                     T.copy(src[slot, :, :],
-                                           dst[previous_row:previous_row + group_rows, :])
+                                           dst[previous_row:previous_row + group_rows, :], l2_cache_ctrl=store_l2_cache_ctrl)
                                     T.ascend_set_flag("MTE3_MTE2", slot)
                     prepared = T.alloc_var("int32", init=0)
                     segments = T.alloc_var("int32", init=0)
@@ -119,9 +119,9 @@ def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks,
                     if not double_buffer:
                         T.ascend_wait_flag("MTE2_MTE3", 0)
                         if valid == group_rows:
-                            T.copy(src[0, :, :], dst[row:row + group_rows, :])
+                            T.copy(src[0, :, :], dst[row:row + group_rows, :], l2_cache_ctrl=store_l2_cache_ctrl)
                         else:
-                            T.copy(src[0, 0:valid, :], dst[row:row + valid, :])
+                            T.copy(src[0, 0:valid, :], dst[row:row + valid, :], l2_cache_ctrl=store_l2_cache_ctrl)
                         T.ascend_set_flag("MTE3_MTE2", 0)
                         T.ascend_wait_flag("MTE3_MTE2", 0)
                 if double_buffer:
@@ -132,9 +132,9 @@ def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks,
                         if (groups - 1) % buffers == slot:
                             T.ascend_wait_flag("MTE2_MTE3", slot)
                             if final_valid == group_rows:
-                                T.copy(src[slot, :, :], dst[final_row:final_row + group_rows, :])
+                                T.copy(src[slot, :, :], dst[final_row:final_row + group_rows, :], l2_cache_ctrl=store_l2_cache_ctrl)
                             else:
-                                T.copy(src[slot, 0:final_valid, :], dst[final_row:end, :])
+                                T.copy(src[slot, 0:final_valid, :], dst[final_row:end, :], l2_cache_ctrl=store_l2_cache_ctrl)
                             T.ascend_set_flag("MTE3_MTE2", slot)
                     # Consume the last release event for each used buffer.
                     for slot in T.unroll(buffers):
@@ -153,7 +153,7 @@ def _compile(batch, pages, page_size, table_width, width, dtype, starts, blocks,
 class AscendPagedKVCacheGatherBatchKernel(AscendPagedKVCacheGatherKernel):
     """Inherit the public launch checks; replace only the compiled schedule."""
 
-    def __init__(self, call, group_tiles=2, double_buffer=False, tile_rows=16):
+    def __init__(self, call, group_tiles=2, double_buffer=False, tile_rows=16, store_l2_cache_ctrl=4):
         reason = self.refusal(call)
         if reason:
             raise ValueError(reason)
@@ -163,9 +163,11 @@ class AscendPagedKVCacheGatherBatchKernel(AscendPagedKVCacheGatherKernel):
             raise ValueError("supported (group_tiles, tile_rows): (2,16), (4,16), (16,4), (8,4)")
         if group_tiles == 16 and double_buffer:
             raise ValueError("16x4 candidate uses a single buffer")
+        if store_l2_cache_ctrl not in (0, 4):
+            raise ValueError("store_l2_cache_ctrl must be 0 or 4 for this experiment")
         Kernel.__init__(self, device_index=call.device.index if call.device is not None else None)
         self.call, self.dtype = call, call.dtype
         self._compiled = _compile(
             call.batch, call.num_pages, call.page_size, call.table_width, call.row_width,
-            self.dtype_str, call.has_starts, _vector_cores(self.device_index), group_tiles, double_buffer, tile_rows,
+            self.dtype_str, call.has_starts, _vector_cores(self.device_index), group_tiles, double_buffer, tile_rows, store_l2_cache_ctrl,
         )

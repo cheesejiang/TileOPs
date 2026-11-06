@@ -12,7 +12,8 @@ from tileops.kernels.attention.paged_cache_gather import PagedKVCacheGatherCall
 class AutoGather:
     """Public-layout adapter; compile on first use, including strided-output staging."""
 
-    def __init__(self, stages=1, tile_rows=16, segmented=False, group_tiles=None, double_buffer=False, simt=False):
+    def __init__(self, stages=1, tile_rows=16, segmented=False, group_tiles=None, double_buffer=False, simt=False, store_l2_cache_ctrl=4):
+        self.store_l2_cache_ctrl = store_l2_cache_ctrl
         self.simt = simt
         self.double_buffer = double_buffer
         self.group_tiles = group_tiles
@@ -37,7 +38,7 @@ class AutoGather:
                 kernel = AscendPagedKVCacheGatherSimtKernel(call)
             elif self.group_tiles is not None:
                 from tileops.kernels.ascend.attention.paged_cache_gather_batch import AscendPagedKVCacheGatherBatchKernel
-                kernel = AscendPagedKVCacheGatherBatchKernel(call, group_tiles=self.group_tiles, double_buffer=self.double_buffer, tile_rows=self.tile_rows)
+                kernel = AscendPagedKVCacheGatherBatchKernel(call, group_tiles=self.group_tiles, double_buffer=self.double_buffer, tile_rows=self.tile_rows, store_l2_cache_ctrl=self.store_l2_cache_ctrl)
             else:
                 kernel = AscendPagedKVCacheGatherAutoKernel(
                     call, stages=self.stages, tile_rows=self.tile_rows, segmented=self.segmented)
@@ -52,13 +53,13 @@ class AutoGather:
 
 
 class _Run:
-    def __init__(self, inputs, stages, tile_rows=16, segmented=False, group_tiles=None, double_buffer=False, simt=False):
+    def __init__(self, inputs, stages, tile_rows=16, segmented=False, group_tiles=None, double_buffer=False, simt=False, store_l2_cache_ctrl=4):
         self.dst = torch.empty_like(inputs[0])
         self.inputs = inputs[1:]
-        self.op = AutoGather(stages, tile_rows, segmented, group_tiles, double_buffer, simt)
+        self.op = AutoGather(stages, tile_rows, segmented, group_tiles, double_buffer, simt, store_l2_cache_ctrl)
         self.provenance = {"schedule": "simt-direct" if simt else ("batched" if group_tiles else "automatic"), "stages": stages,
                            "group_tiles": group_tiles, "double_buffer": double_buffer,
-                           "tile_rows": tile_rows,
+                           "tile_rows": tile_rows, "store_l2_cache_ctrl": store_l2_cache_ctrl,
                            "segmented": segmented,
                            "experimental": True, "explicit_events": group_tiles is not None}
 
@@ -142,5 +143,18 @@ def make_overlap_implementations(op_name, case):
     ):
         run = _Run(case.inputs, stages=1, group_tiles=group_tiles,
                    tile_rows=4, double_buffer=double_buffer)
+        result[name] = Implementation(run, args=(), reset=run.reset)
+    return result
+
+
+def make_store_policy_implementations(op_name, case):
+    """Same overlap32-r4 schedule, changing only the UB-to-GM L2 policy."""
+    if op_name != "PagedKVCacheGatherFwdOp" or case.inputs[1].dtype not in (torch.float16, torch.bfloat16):
+        return {}
+    result = {}
+    for mode in (4, 0):
+        run = _Run(case.inputs, stages=1, group_tiles=8, tile_rows=4,
+                   double_buffer=True, store_l2_cache_ctrl=mode)
+        name = f"tilelang-overlap32-r4-store{mode}"
         result[name] = Implementation(run, args=(), reset=run.reset)
     return result
