@@ -187,16 +187,18 @@ def make_store0_overlap_implementations(op_name, case):
 
 
 def make_auto2_store0_implementations(op_name, case):
-    """Compare automatic scheduling with manual overlap under the same store policy."""
-    if op_name != "PagedKVCacheGatherFwdOp" or case.inputs[1].dtype not in (torch.float16, torch.bfloat16):
+    """Auto2-store0 for all seven cases; historical overlap only for FP16/BF16."""
+    if op_name != "PagedKVCacheGatherFwdOp":
         return {}
     automatic = _Run(case.inputs, stages=2, tile_rows=16, store_l2_cache_ctrl=0)
-    overlap = _Run(case.inputs, stages=1, group_tiles=8, tile_rows=4,
-                   double_buffer=True, store_l2_cache_ctrl=0)
-    return {
+    result = {
         "tilelang-auto2-store0": Implementation(automatic, args=(), reset=automatic.reset),
-        "tilelang-overlap32-r4-store0": Implementation(overlap, args=(), reset=overlap.reset),
     }
+    if case.inputs[1].dtype in (torch.float16, torch.bfloat16):
+        overlap = _Run(case.inputs, stages=1, group_tiles=8, tile_rows=4,
+                       double_buffer=True, store_l2_cache_ctrl=0)
+        result["tilelang-overlap32-r4-store0"] = Implementation(overlap, args=(), reset=overlap.reset)
+    return result
 
 
 def make_gatherv2_layout_implementations(op_name, case):
