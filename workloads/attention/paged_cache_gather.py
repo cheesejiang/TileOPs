@@ -75,13 +75,7 @@ class PagedKVCacheGatherWorkload(WorkloadBase):
             )
         if dst.numel() == 0:
             return torch.empty_like(dst)
-        flat_cache = cache.flatten(0, 1)
-        indices = torch.cat(slots)
-        if cache.device.type == "npu" and cache.dtype == torch.float8_e4m3fn:
-            # NPU Index does not support FP8; gather storage bytes exactly.
-            rows = flat_cache.view(torch.uint8)[indices].view(cache.dtype)
-        else:
-            rows = flat_cache[indices]
+        rows = cache.flatten(0, 1)[torch.cat(slots)]
         if scale is not None:
             rows = rows.float() * scale
         return rows.to(dst.dtype)

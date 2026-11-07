@@ -448,14 +448,7 @@ def _unchanged(tensors: list, snapshot: list) -> bool:
                 if tensor.device != source.device:
                     return False
                 tensor, source = tensor.cpu(), source.cpu()
-            if tensor.dtype == source.dtype == torch.float8_e4m3fn:
-                # Exact storage comparison avoids unsupported NPU FP8 IsClose.
-                torch.testing.assert_close(
-                    tensor.contiguous().view(torch.uint8),
-                    source.contiguous().view(torch.uint8), rtol=0, atol=0,
-                )
-            else:
-                torch.testing.assert_close(tensor, source, rtol=0, atol=0, equal_nan=True)
+            torch.testing.assert_close(tensor, source, rtol=0, atol=0, equal_nan=True)
     except AssertionError:
         return False
     return True
