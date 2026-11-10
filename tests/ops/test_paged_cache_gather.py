@@ -90,6 +90,50 @@ def test_paged_kv_cache_gather(lengths, shape, page, dtype, out_dtype, starts, t
 
 
 @pytest.mark.smoke
+def test_paged_kv_cache_gather_ascend_dispatch():
+    """Public irregular geometries use the general path; model cases stay fast."""
+    import math
+    from dataclasses import replace
+
+    from tileops._kernels.attention.paged_cache_gather import PagedKVCacheGatherCall
+    from tileops.manifest import entry_plan, instantiate, load_adts, load_manifest
+    from workloads.device import run_device
+
+    device = torch.device(run_device())
+    if device.type != "npu":
+        pytest.skip("Ascend dispatch contract")
+    op = PagedKVCacheGatherFwdOp()
+    entry = load_manifest()["PagedKVCacheGatherFwdOp"]
+    plan = entry_plan("PagedKVCacheGatherFwdOp", entry, load_adts(), resolve=False)
+    for row in entry["workloads"]:
+        for dtype_case in row["dtype_cases"]:
+            model = instantiate(plan, row, dtype_case)
+            dtype = getattr(torch, dtype_case["KV"])
+            call = PagedKVCacheGatherCall(
+                batch=model.indices["B"], num_pages=model.indices["NP"],
+                page_size=model.indices["PS"], table_width=model.indices["W"],
+                row_width=math.prod(model.indices["E"]), dtype=dtype,
+                out_dtype=getattr(torch, model.params["out_dtype"])
+                if model.params["out_dtype"] else dtype,
+                has_starts=model.present("seq_starts"), device=device,
+            )
+            assert op.key_for("paged_cache_gather", call) == "ascend"
+    base = PagedKVCacheGatherCall(
+        batch=3, num_pages=30, page_size=7, table_width=10, row_width=15,
+        dtype=torch.float16, out_dtype=torch.float16, device=device,
+    )
+    for changes in (
+        {},
+        dict(page_size=4, row_width=1, has_starts=True),
+        dict(row_width=320, dtype=torch.float8_e4m3fn, out_dtype=torch.float16),
+        dict(page_size=16, row_width=320, has_starts=True),
+        dict(dtype=torch.bfloat16, out_dtype=torch.bfloat16, has_starts=True),
+        dict(page_size=64, row_width=576, table_width=1 << 25),
+    ):
+        assert op.key_for("paged_cache_gather", replace(base, **changes)) == "ascend_generic"
+
+
+@pytest.mark.smoke
 def test_paged_kv_cache_gather_strided_destination():
     workload = PagedKVCacheGatherWorkload([3, 17], (3, 5), 7, torch.bfloat16, starts=[1, 2])
     inputs = list(workload.gen_inputs())
