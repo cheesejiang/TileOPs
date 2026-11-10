@@ -15,6 +15,58 @@ BENCH = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(BENCH)
 
 
+@unittest.skipUnless(importlib.util.find_spec("torch"), "requires CPU PyTorch")
+class FP8PipelineTests(unittest.TestCase):
+    def test_fp8_clone_reset_and_full_reference_check(self):
+        import ast
+
+        import torch
+
+        reference_path = SOURCE.parents[1].parent / "workloads/attention/paged_cache_write.py"
+        tree = ast.parse(reference_path.read_text())
+        workload = next(n for n in tree.body if isinstance(n, ast.ClassDef)
+                        and n.name == "PagedKVCacheWriteWorkload")
+        function = next(n for n in workload.body if isinstance(n, ast.FunctionDef)
+                        and n.name == "ref_program")
+        namespace = {"torch": torch}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(reference_path), "exec"), namespace)
+        reference = lambda *args: namespace["ref_program"](None, *args)
+
+        for dtype in (torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                k = torch.arange(12).reshape(3, 1, 4).to(dtype)
+                v = -k
+                pages = torch.full((2, 2, 1, 4), 0.375).to(torch.float8_e4m3fn)
+                inputs = (k, v, pages, pages.view(torch.uint8).clone().view(pages.dtype),
+                          torch.tensor([3, -1, 0]), torch.tensor([1.25]), torch.tensor([0.75]))
+                case = types.SimpleNamespace(inputs=inputs, reference=reference)
+
+                def run(*args):
+                    expected = reference(*args)
+                    for target, source in zip(args[2:4], expected):
+                        BENCH._bytes(target).copy_(BENCH._bytes(source))
+                    return args[2:4]
+
+                fake_api = types.SimpleNamespace(Implementation=types.SimpleNamespace)
+                with patch.dict("sys.modules", {"benchmarks.api": fake_api}):
+                    impl = BENCH.private_inputs(run, inputs, 2, 3)
+                results = BENCH.benchmark_case(
+                    case, {"test": impl}, None, name="fp8", verify_only=True
+                )
+                self.assertEqual(results["test"]["correctness"]["checked_outputs"], 2)
+                impl.reset()
+                self.assertTrue(torch.equal(BENCH._bytes(impl.args[2]), BENCH._bytes(pages)))
+
+                def corrupt(*args):
+                    result = run(*args)
+                    BENCH._bytes(result[0]).flatten()[0] = 0
+                    return result
+
+                impl.run = corrupt
+                with self.assertRaisesRegex(AssertionError, "output 0 differs"):
+                    BENCH.benchmark_case(case, {"test": impl}, None, name="fp8", verify_only=True)
+
+
 class TimerTests(unittest.TestCase):
     def fake_torch(self, samples):
         log = []

@@ -5,13 +5,105 @@ uses private cache pools and is checked against the independent reference
 before timing. The generic implementation is the pre-optimization baseline.
 """
 
+def _bytes(tensor):
+    import torch
+
+    return tensor.detach().view(torch.uint8).contiguous()
+
+
+def private_inputs(run, inputs, *positions):
+    """Clone/reset storage as bytes, including unsupported NPU FP8 copy dtypes."""
+    from benchmarks.api import Implementation
+
+    args = list(inputs)
+    for index in positions:
+        args[index] = _bytes(inputs[index]).clone().view(inputs[index].dtype)
+
+    def reset():
+        for index in positions:
+            _bytes(args[index]).copy_(_bytes(inputs[index]))
+
+    return Implementation(run=run, args=tuple(args), reset=reset)
+
+
+def benchmark_case(case, implementations, timer, *, name, verify_only=False):
+    """Full CPU byte validation avoids unsupported FP8 NPU comparison/index ops."""
+    import torch
+
+    def cpu(tensor):
+        return _bytes(tensor).cpu().clone().view(tensor.dtype)
+
+    inputs = case.inputs
+    pristine = [cpu(t) if t is not None else None for t in inputs]
+    expected = case.reference(*pristine)
+
+    def unchanged(actual, reference, label):
+        if actual is not None and not torch.equal(_bytes(actual).cpu(), _bytes(reference)):
+            raise AssertionError(f"{label}: input bytes changed")
+
+    results = {}
+    for tag, impl in implementations.items():
+        args = inputs if impl.args is None else impl.args
+        if impl.reset is not None:
+            impl.reset()
+        actual = impl.run(*args)
+        if len(actual) != 2 or len(expected) != 2:
+            raise AssertionError(f"{tag}: expected exactly two cache outputs")
+        for index, (got, want) in enumerate(zip(actual, expected, strict=True)):
+            if got.shape != want.shape or got.dtype != want.dtype:
+                raise AssertionError(f"{tag}: output {index} shape/dtype mismatch")
+            got_bytes, want_bytes = _bytes(got).cpu(), _bytes(want)
+            if not torch.equal(got_bytes, want_bytes):
+                positions = (got_bytes != want_bytes).nonzero()
+                raise AssertionError(f"{tag}: output {index} differs at {positions[:16].tolist()}")
+        for index, (shared, saved) in enumerate(zip(inputs, pristine, strict=True)):
+            unchanged(shared, saved, f"{tag}: shared input {index}")
+            if index not in (2, 3):
+                unchanged(args[index], saved, f"{tag}: argument {index}")
+        result = {"correctness": {"checked_outputs": 2, "total_outputs": 2,
+                                  "method": "full_cpu_byte_comparison"}}
+        results[tag] = result
+    if not verify_only:
+        # Establish correctness for every candidate before timing any of them.
+        for tag, impl in implementations.items():
+            args = inputs if impl.args is None else impl.args
+            results[tag]["measurement"] = timer.measure(
+                impl.run, args, reset=impl.reset, name=f"{name}/{tag}"
+            )
+            for index, (shared, saved) in enumerate(zip(inputs, pristine, strict=True)):
+                unchanged(shared, saved, f"{tag}: shared input {index} after timing")
+                if index not in (2, 3):
+                    unchanged(args[index], saved, f"{tag}: argument {index} after timing")
+    return results
+
+
+def prepare_inputs(case, device):
+    """Generate FP8 values on CPU and transfer their storage without NPU casts."""
+    from workloads.device import run_device, set_run_device
+
+    previous = run_device()
+    try:
+        set_run_device("cpu")
+        host_inputs = case.inputs
+    finally:
+        set_run_device(previous)
+    inputs = tuple(
+        _bytes(tensor).to(device).view(tensor.dtype) if tensor is not None else None
+        for tensor in host_inputs
+    )
+    # Case.inputs is a cached property; keep all adapters on the transferred data.
+    case.__dict__["inputs"] = inputs
+    return inputs
+
+
 def candidates(op_name, case, *, sweep=True):
     if op_name != "PagedKVCacheWriteFwdOp":
         return {}
     import torch
 
-    from benchmarks.baselines import private_inputs
-    from tileops._kernels.ascend.attention.paged_cache_write import build, build_batched
+    from tileops._kernels.ascend.attention.paged_cache_write import (
+        build, build_batched, launch_config,
+    )
 
     inputs = case.inputs
     k, _, pages, _, _, _, _ = inputs
@@ -40,6 +132,11 @@ def candidates(op_name, case, *, sweep=True):
         return private_inputs(run, inputs, 2, 3)
 
     result = {"generic": implementation(build(width, physical, dtype, quantized))}
+    config = launch_config(n, width, quantized)
+    optimized = build(width, physical, dtype, quantized) if config is None else build_batched(
+        width, physical, dtype, quantized, *config
+    )
+    result["optimized-kernel"] = implementation(optimized)
     if sweep and width % 64 == 0 and n:
         for rows in (1, 4, 8, 16):
             if n % rows or rows * width > 16384:
@@ -113,6 +210,7 @@ def write_summary(directory, metadata, rows, *, complete):
         f"- 计时协议：`{metadata['protocol']}`；预热 {options['warmup']} 次，"
         f"采样 {options['repeats']} 次；计时前清缓存 {options['flush_mb']} MiB。",
         "- 基线：原始通用 Ascend 内核 `generic`；加速比 = 基线均值 / 当前实现均值。",
+        "- 性能对比均直接调用已编译内核；公共 Op 单独验证正确性，不计入内核加速比。",
         "- 正确性使用独立参考检查全部输出及输入保持规则；失败规格不视为验证通过。",
         "",
         "| 规格 | 实现 | 正确性 | 平均耗时 (µs) | 中位耗时 (µs) | 相对基线加速比 |",
@@ -268,8 +366,6 @@ def main(argv=None):
     torch.npu.set_device(device)
 
     from benchmarks.api import cases
-    from benchmarks.ascend.runner import benchmark_case
-    from benchmarks.baselines import private_inputs
     from tileops import ascend  # noqa: F401 -- register kernels in source-tree runs
     from tileops.attention import PagedKVCacheWriteFwdOp
     from tileops.backend import BUILTIN
@@ -290,6 +386,7 @@ def main(argv=None):
         "tilelang": version("tilelang"),
         "clock_policy": "unlocked",
         "protocol": "ascend-single-device-unlocked-events-v1",
+        "measurement_scope": "compiled_kernel",
         "arguments": vars(args),
     }
     (args.run_dir / "environment.json").write_text(json.dumps(metadata, indent=2, default=str))
@@ -308,14 +405,18 @@ def main(argv=None):
                 torch.random.default_generator.manual_seed(20261110)
                 with torch.npu.device(device):
                     torch.npu.manual_seed(20261110)
-                inputs = case.inputs
+                inputs = prepare_inputs(case, device)
                 op = PagedKVCacheWriteFwdOp(target=BUILTIN)
 
                 def run(*inputs):
                     return paged_cache_write_result(op, *inputs)
 
-                implementations = {"tileops": private_inputs(run, inputs, 2, 3)}
-                implementations.update(candidates("PagedKVCacheWriteFwdOp", case, sweep=args.sweep))
+                row["public_op_correctness"] = benchmark_case(
+                    case, {"public-op": private_inputs(run, inputs, 2, 3)},
+                    None, name=case.id, verify_only=True,
+                )["public-op"]["correctness"]
+                implementations = candidates("PagedKVCacheWriteFwdOp", case, sweep=args.sweep)
+                implementations["tileops"] = implementations.pop("optimized-kernel")
                 row["implementations"] = benchmark_case(
                     case, implementations, timer, name=case.id, verify_only=args.verify_only
                 )

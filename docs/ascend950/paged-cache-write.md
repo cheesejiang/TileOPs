@@ -61,8 +61,9 @@ other cards can remain in use. `--device 3` means logical NPU 3 in the process's
 visible device list, which may differ from the physical card ID when visibility
 environment variables are set. Keep the selected card free for the measurement.
 
-By default the benchmark checks and measures the optimized Op and the original
-generic Ascend kernel, reporting `speedup_vs_generic` for each implementation:
+By default the benchmark separately verifies the public Op, then checks and
+measures the compiled optimized kernel and original generic Ascend kernel at
+the same call level, reporting `speedup_vs_generic` for each implementation:
 
 ```bash
 python scripts/bench_paged_cache_write_ascend.py \
@@ -99,6 +100,16 @@ This entry does not require the
 shared runner's TileLang 0.1.15 version pin; it still requires the Ascend language
 and SIMD APIs used by the kernel. Select defaults from the resulting device
 measurements by updating `launch_config`.
+
+FP8 host-side preparation and reference arithmetic run on CPU. Only byte views
+are transferred, cloned and restored on NPU, avoiding unsupported FP8 NPU cast,
+clone, indexing and comparison operations in the harness. Every cache byte is
+checked against the independent CPU reference, including rows not named by a
+slot. Inputs are checked for preservation before and after timing. These host
+checks and resets are outside the event windows. `public_op_correctness`
+records the separate public API check; the `tileops` measurement represents the
+compiled optimized kernel, not Op dispatch. Earlier Op-versus-kernel timing
+results should be rerun before comparing speedups.
 
 The shared `scripts/benchmark_ascend.py` entry remains available with its original
 reservation, profiler and clock requirements for other benchmark workflows.
