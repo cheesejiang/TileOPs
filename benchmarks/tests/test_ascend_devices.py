@@ -99,9 +99,8 @@ class PhysicalDeviceTest(unittest.TestCase):
                 "component_mhz": [1000, 1000],
                 "lock": ["/site/lock"], "restore": ["/site/restore"],
             }))
-            with patch("benchmarks.ascend.clocks.require_reservation", return_value={"device": 3}):
-                with self.assertRaisesRegex(ValueError, "Nonzero NPU"):
-                    ClockPolicy(config)
+            with self.assertRaisesRegex(ValueError, "Nonzero NPU"):
+                ClockPolicy(config, device=3)
 
 
 if __name__ == "__main__":

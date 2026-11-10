@@ -2,7 +2,7 @@
 
 A site supplies argv arrays for its supported lock/restore tool. The benchmark
 never guesses a driver debug command. Missing policy or a failed readback aborts
-measurement. Policy changes happen only inside the host reservation.
+measurement.
 """
 
 import ctypes
@@ -10,7 +10,6 @@ import json
 import subprocess
 from pathlib import Path
 
-from benchmarks.ascend.guard import require_reservation
 
 
 class _Frequency(ctypes.Structure):
@@ -18,12 +17,12 @@ class _Frequency(ctypes.Structure):
 
 
 class ClockPolicy:
-    def __init__(self, config: Path):
-        self.device = require_reservation()["device"]
+    def __init__(self, config: Path, *, device=0):
+        self.device = device
         self.spec = json.loads(config.read_text())
         declared = self.spec.get("device")
         if declared is not None and declared != self.device:
-            raise ValueError("Clock policy device does not match the reserved physical NPU")
+            raise ValueError("Clock policy device does not match the selected physical NPU")
         self.targets = self.spec["component_mhz"]
         if len(self.targets) != 2 or any(type(v) is not int or v <= 0 for v in self.targets):
             raise ValueError("component_mhz must contain two positive integer frequencies")
@@ -64,7 +63,6 @@ class ClockPolicy:
         return values
 
     def __enter__(self):
-        require_reservation()
         self.before = self.read()
         if any(
             target > v["rated_mhz"] for target, v in zip(self.targets, self.before, strict=True)

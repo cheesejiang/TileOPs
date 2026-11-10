@@ -9,7 +9,6 @@ import contextlib
 import statistics
 from pathlib import Path
 
-from benchmarks.ascend.guard import require_reservation
 from benchmarks.ascend.profile_parser import _parse_ffts_profile
 
 PROTOCOL = "ascend950-profiler-locked-v1"
@@ -43,14 +42,13 @@ def _profile(directory):
 
 
 class ProfilerTimer:
-    """One guarded run, with an applied clock policy or explicit unlocked mode."""
+    """One run, with an applied clock policy or explicit unlocked mode."""
 
     unlocked = False
 
     def __init__(self, directory: Path, clocks, *, unlocked=False):
         if (clocks is None) != unlocked:
             raise ValueError("provide clocks for locked timing, or explicitly use unlocked=True")
-        require_reservation()
         import torch
         from tilelang.profiler.msprof import get_msprof_cache_flush_kernel
 
@@ -83,7 +81,6 @@ class ProfilerTimer:
 
     def measure(self, fn, args=(), *, reset=None, name="call", search=False):
         """Measure a verified callable; short search records never carry the formal protocol."""
-        require_reservation()
         import torch
 
         warmup, repeats = (1, 3) if search else (WARMUP, REPEATS)
@@ -119,6 +116,7 @@ class ProfilerTimer:
         return {
             "protocol": protocol if not search else protocol + "-search",
             "clock_locked": not self.unlocked,
+            "exclusive": False,
             "profiler": "torch_npu.profiler.profile",
             "metric": "mean_device_busy_union_ms",
             "warmup": warmup,

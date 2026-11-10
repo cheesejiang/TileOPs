@@ -5,14 +5,13 @@ import dataclasses
 import hashlib
 import importlib
 import json
+import os
 import re
 import signal
 import sys
 import traceback
 from importlib.metadata import version
 from pathlib import Path
-
-from benchmarks.ascend.guard import require_reservation
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -115,7 +114,9 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, interrupted)
     if not args.verify_only and args.clock_config is None and not args.unlocked:
         parser.error("measurement requires --clock-config or explicit --unlocked")
-    reservation = require_reservation()
+    physical_device = int(os.environ.get("TILEOPS_NPU_DEVICE", "0"))
+    if not 0 <= physical_device < 65536:
+        parser.error("invalid physical NPU ID in TILEOPS_NPU_DEVICE")
     if version("tilelang").split("+", 1)[0] != "0.1.15":
         raise RuntimeError("This protocol requires the official TileLang 0.1.15 release")
     before = source_fingerprint()
@@ -134,7 +135,7 @@ def main(argv=None):
     registry.ensure_loaded()
     if registry.LOAD_FAILURES:
         raise RuntimeError(registry.LOAD_FAILURES)
-    # The guard exposes exactly the selected physical card as logical device 0.
+    # The launcher exposes exactly the selected physical card as logical device 0.
     torch.npu.set_device(0)
     set_run_device("npu:0")
     device_name = torch.npu.get_device_name(0)
@@ -161,9 +162,9 @@ def main(argv=None):
         "cann_components": runtime_versions(torch_npu.utils.get_cann_version),
         "python": sys.version,
         "device": device_name,
-        "physical_device": reservation["device"],
+        "physical_device": physical_device,
         "logical_device": 0,
-        "reservation": reservation,
+        "exclusive": False,
         "ops": selected,
         "verify_only": args.verify_only,
         "unlocked": args.unlocked,
@@ -178,7 +179,8 @@ def main(argv=None):
     passed = failed = 0
     completed = False
     clock_context = (
-        nullcontext() if args.verify_only or args.unlocked else ClockPolicy(args.clock_config)
+        nullcontext() if args.verify_only or args.unlocked
+        else ClockPolicy(args.clock_config, device=physical_device)
     )
     try:
         with clock_context as clocks:
@@ -255,6 +257,7 @@ def main(argv=None):
                 "source_changed": changed,
                 "verify_only": args.verify_only,
                 "unlocked": args.unlocked,
+                "exclusive": False,
             },
         )
     return 0 if completed and passed and not failed and not changed else 1

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Team benchmark entry point: reserve the host NPU before importing its runtime."""
+"""Run benchmarks on one selected physical NPU without acquiring a reservation."""
 
 import argparse
 import datetime
@@ -15,40 +15,27 @@ def main():
     parser.add_argument(
         "--run-dir", type=Path, required=True, help="new directory; existing output is never reused"
     )
-    parser.add_argument("--owner", required=True)
+    parser.add_argument("--owner", default=os.environ.get("USER", "benchmark"))
     parser.add_argument("--device", type=int, default=0, help="Physical NPU ID (default 0)")
-    parser.add_argument("--wait", type=int, default=600)
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument(
-        "--guard",
-        type=Path,
-        default=Path(os.environ.get("TILEOPS_NPU_GUARD", Path(__file__).parent / "npu_guard.py")),
-        help="site-audited host guard Python entry; defaults to the bundled guard",
-    )
     args, rest = parser.parse_known_args()
     if "--help" in rest:
         return 0
     if not 0 <= args.device < 65536:
         parser.error("--device must be in 0..65535")
+    if args.timeout <= 0:
+        parser.error("--timeout must be positive")
     run = args.run_dir.resolve()
     run.mkdir(parents=True, exist_ok=False)
     root = Path(__file__).resolve().parents[1]
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join((str(root / "src"), str(root)))
-    guard = args.guard.resolve(strict=True)
+    env.update(
+        ASCEND_RT_VISIBLE_DEVICES=str(args.device),
+        ASCEND_VISIBLE_DEVICES=str(args.device),
+        TILEOPS_NPU_DEVICE=str(args.device),
+    )
     command = [
-        sys.executable,
-        str(guard),
-        "run",
-        "--device",
-        str(args.device),
-        "--owner",
-        args.owner,
-        "--wait",
-        str(args.wait),
-        "--timeout",
-        str(args.timeout),
-        "--",
         sys.executable,
         "-m",
         "benchmarks.ascend.runner",
@@ -58,13 +45,22 @@ def main():
     ]
     started = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with (run / "run.log").open("x") as log:
-        result = subprocess.run(command, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            result = subprocess.run(
+                command, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT,
+                timeout=args.timeout,
+            )
+            exit_code = result.returncode
+        except subprocess.TimeoutExpired:
+            exit_code = 124
     child = run / "result.json"
     summary = json.loads(child.read_text()) if child.exists() else {}
-    success = result.returncode == 0 and summary.get("status") == "passed"
+    success = exit_code == 0 and summary.get("status") == "passed"
     receipt = {
         "status": "passed" if success else "failed",
-        "guard_exit_code": result.returncode,
+        "exit_code": exit_code,
+        "exclusive": False,
+        "owner": args.owner,
         "started_at": started,
         "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "command": command,
@@ -73,7 +69,7 @@ def main():
     }
     (run / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps({"run_dir": str(run), **receipt}, indent=2))
-    return 0 if success else (result.returncode or 1)
+    return 0 if success else (exit_code or 1)
 
 
 if __name__ == "__main__":

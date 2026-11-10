@@ -50,7 +50,6 @@ def test_missing_device_records_fail(tmp_path):
 def test_measurement_requires_one_explicit_clock_mode(monkeypatch, tmp_path, options):
     from benchmarks.ascend import runner
 
-    monkeypatch.setattr(runner, "require_reservation", lambda: pytest.fail("runtime entered"))
     with pytest.raises(SystemExit) as error:
         runner.main(["--run-dir", str(tmp_path), "--op", "PagedKVCacheGatherFwdOp", *options])
     assert error.value.code == 2
@@ -92,7 +91,6 @@ def test_isolated_windows_have_fixed_counts_and_no_event_timer(monkeypatch, tmp_
     fake_npu = SimpleNamespace(synchronize=lambda: calls.append(("sync", active)))
     fake_npu.Event = lambda *a, **k: pytest.fail("event timer used")
     monkeypatch.setattr(torch, "npu", fake_npu, raising=False)
-    monkeypatch.setattr(timing, "require_reservation", lambda: {})
 
     @contextlib.contextmanager
     def profile(path):
@@ -124,6 +122,7 @@ def test_isolated_windows_have_fixed_counts_and_no_event_timer(monkeypatch, tmp_
     assert result["samples_ms"] == list(range(1, 16))
     assert result["latency_ms"] == 8
     assert result["protocol"] == (timing.UNLOCKED_PROTOCOL if unlocked else timing.PROTOCOL)
+    assert result["exclusive"] is False
     assert result["clock_locked"] is not unlocked
     assert sum(kind == "clock" for kind, _ in calls) == (0 if unlocked else 33)
     assert [kind for kind, inside in calls if inside and kind != "sync"] == ["op"] * 15
@@ -145,7 +144,6 @@ def test_clock_policy_restores_after_success_or_failure(monkeypatch, failure):
     policy.targets = [1000, 1000]
     policy.samples = []
     policy.read = lambda: [{"rated_mhz": 1200, "mhz": 1000}] * 2
-    monkeypatch.setattr(clocks, "require_reservation", lambda: {})
 
     def run(command, **kwargs):
         commands.append(command)
@@ -176,7 +174,6 @@ def test_clock_policy_rejects_above_rated_before_setting(monkeypatch):
     policy = clocks.ClockPolicy.__new__(clocks.ClockPolicy)
     policy.targets = [1300, 1000]
     policy.read = lambda: [{"rated_mhz": 1200, "mhz": 1000}] * 2
-    monkeypatch.setattr(clocks, "require_reservation", lambda: {})
     monkeypatch.setattr(
         clocks.subprocess, "run", lambda *a, **k: pytest.fail("clock command executed")
     )

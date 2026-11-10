@@ -66,7 +66,7 @@ python scripts/benchmark_ascend.py \
   --unlocked
 ```
 
-This retains correctness checks, reservation, profiler windows and cache eviction.
+This retains correctness checks, profiler windows and cache eviction.
 It does not read, set or restore clocks. Measurements carry
 `protocol=ascend950-profiler-unlocked-v1` and `clock_locked=false`; they are
 development measurements, not locked performance acceptance. `--unlocked` and
@@ -75,18 +75,14 @@ and `run.log` under the run directory. No Triton/Inductor compilation is request
 by this benchmark entry point.
 
 `--device N` selects one physical NPU for the entire run (default 0), including
-all selected manifest cases. The guard uses `device-N.lock`, probes that card,
-and exposes it alone to the child, where it is logical `npu:0`. The result
-metadata records both IDs. Other cards' explicit compute handles do not block
-the selected card; processes holding only shared manager handles remain
-conservative initialization candidates. The host administrator initializes each
-selected lock once with `python scripts/npu_guard.py init --device N`.
+all selected manifest cases. The launcher exposes it alone to the child as
+logical `npu:0`. Results record both IDs and `exclusive=false`. This entry point
+does not acquire a lock, wait for an idle card, or monitor other processes.
 
 For locked timing on nonzero cards, use a matching clock policy with a `device`
 field, or put `{device}` in both the lock and restore argv arrays; it is replaced
 with the physical ID. DSMI readbacks query the selected physical card and both
-of its components. Site-provided guards must accept `run --device N` and publish
-the matching reservation and `TILEOPS_NPU_DEVICE` environment variable.
+of its components.
 
 Every developer and baseline adapter uses this entry point from the same revision:
 
@@ -98,19 +94,9 @@ python scripts/benchmark_ascend.py \
   --op BmmFwdOp
 ```
 
-The launcher acquires the host reservation **before runtime imports** and wraps the
-whole foreground process. All users share `/run/lock/ascend-npu/device-N.lock`
-for the selected physical card (`device-0.lock` by default).
-The guard checks driver processes, device handles, health and sustained idle before
-launch, and checks for foreign driver activity while running. It is a cooperative
-lock: unrelated programs can ignore it. Never delete a held lock or reset a device to
-make a run start. Guard exits 75, 76 and 78 invalidate the run.
-
-Sites with a different physical device mapping can supply their audited Python
-guard entry with `--guard /absolute/path/to/npu_guard.py` or `TILEOPS_NPU_GUARD`.
-It must implement the same host lock and process-ownership contract; this option
-does not disable reservation validation. Containers need the actual host lock and
-host PID visibility. A private container lock is insufficient.
+The launcher starts the benchmark directly after setting device visibility.
+The standalone `npu_guard.py` utility is not used by this entry point. The
+receipt and every measurement explicitly record that execution is nonexclusive.
 
 The fixed formal protocol is `ascend950-profiler-locked-v1`:
 
@@ -123,13 +109,13 @@ The fixed formal protocol is `ascend950-profiler-locked-v1`:
 | Clock        | Apply site's verified lock command; independently read both components before/after each sample; restore on exit                                        |
 | Timer        | `torch_npu.profiler.profile`, raw CANN `ffts_profile` kernel durations                                                                                  |
 | Score        | Arithmetic mean of per-call device execution interval unions; host gaps excluded; overlapping kernels count once; duration sum retained as a diagnostic |
-| Evidence     | All 15 samples and raw traces, environment, clock readbacks, code/contract hashes, final guard receipt                                                  |
+| Evidence     | All 15 samples and raw traces, environment, clock readbacks, code/contract hashes, launcher receipt                                                  |
 | Invalid runs | Correctness, profiler, clock, contamination or source-change failure prevents acceptance                                                                |
 | Event timing | No event or wall-clock fallback in the Ascend timer                                                                                                     |
 
 The run directory must be new. There is no silent resume, sample trimming or per-developer
 warmup/repeat override. Consume a result only after `receipt.json` says `passed` and its
-`result.verify_only` is false. A row written before a later guard failure is invalid.
+`result.verify_only` is false. A row written before a later run failure is invalid.
 The raw profiler directory can be large; archive it with the result instead of deleting
 it before review. Results from other protocol IDs, TileLang versions or clock policies
 are not interchangeable, including earlier development measurements.
