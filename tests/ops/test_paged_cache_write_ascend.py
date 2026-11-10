@@ -23,18 +23,18 @@ def _selected_device():
 @pytest.mark.parametrize(
     "n,h,d,npages,page,dtype,fp8",
     [
-        (64, 8, 128, 4096, 16, torch.bfloat16, False),
-        (64, 8, 128, 4096, 16, torch.float16, False),
-        (8192, 8, 128, 4096, 16, torch.bfloat16, False),
-        (4096, 4, 128, 4096, 16, torch.bfloat16, True),
-        (256, 8, 64, 4096, 16, torch.bfloat16, False),
-        (7, 2, 64, 5, 7, torch.float16, False),
-        (1024, 4, 128, 512, 32, torch.float16, True),
-        (17, 4, 128, 7, 7, torch.bfloat16, True),
-        (9, 2, 65, 5, 7, torch.float16, False),
-        (9, 2, 65, 5, 7, torch.bfloat16, True),
-        (3, 17, 128, 3, 7, torch.float16, True),
-        (0, 2, 64, 5, 7, torch.bfloat16, False),
+        pytest.param(7, 2, 64, 5, 7, torch.float16, False, marks=pytest.mark.smoke),
+        pytest.param(17, 4, 128, 7, 7, torch.bfloat16, True, marks=pytest.mark.smoke),
+        pytest.param(9, 2, 65, 5, 7, torch.float16, False, marks=pytest.mark.smoke),
+        pytest.param(9, 2, 65, 5, 7, torch.bfloat16, True, marks=pytest.mark.smoke),
+        pytest.param(3, 17, 128, 3, 7, torch.float16, True, marks=pytest.mark.smoke),
+        pytest.param(0, 2, 64, 5, 7, torch.bfloat16, False, marks=pytest.mark.smoke),
+        pytest.param(64, 8, 128, 4096, 16, torch.bfloat16, False, marks=pytest.mark.full),
+        pytest.param(64, 8, 128, 4096, 16, torch.float16, False, marks=pytest.mark.full),
+        pytest.param(8192, 8, 128, 4096, 16, torch.bfloat16, False, marks=pytest.mark.full),
+        pytest.param(4096, 4, 128, 4096, 16, torch.bfloat16, True, marks=pytest.mark.full),
+        pytest.param(256, 8, 64, 4096, 16, torch.bfloat16, False, marks=pytest.mark.full),
+        pytest.param(1024, 4, 128, 512, 32, torch.float16, True, marks=pytest.mark.full),
     ],
 )
 def test_scatter(n, h, d, npages, page, dtype, fp8):
@@ -76,6 +76,7 @@ def test_scatter(n, h, d, npages, page, dtype, fp8):
         assert torch.equal(actual.cpu().view(torch.uint8), reference.view(torch.uint8))
 
 
+@pytest.mark.smoke
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("rows", [1, 8])
 def test_fp8_special_values(dtype, rows):
