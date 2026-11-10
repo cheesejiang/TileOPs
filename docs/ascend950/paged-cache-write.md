@@ -71,7 +71,11 @@ python scripts/bench_paged_cache_write_ascend.py \
 ```
 
 Add `--sweep` to compare row batch sizes 1/4/8/16 at up to 32/64 vector cores,
-or `--verify-only` to skip timing. Use a fresh run directory each time.
+or `--verify-only` to skip timing. `--run-dir` is a directory prefix: each run
+automatically appends Shanghai date/time including microseconds, for example
+`/tmp/paged-cache-write-card3-20261110-183000-123456`. A numeric suffix handles
+timestamp collisions without overwriting earlier runs. The selected directory
+is printed at startup. Without `--run-dir`, the prefix is `results/paged-cache-write`.
 `--case-regex 'llama-8b-decode'` selects a subset of workloads.
 
 The protocol is `ascend-single-device-unlocked-events-v1`: 3 warmups, 15

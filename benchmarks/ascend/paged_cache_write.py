@@ -55,6 +55,24 @@ def candidates(op_name, case, *, sweep=True):
     return result
 
 
+def create_run_directory(prefix):
+    from datetime import datetime
+    from pathlib import Path
+    from zoneinfo import ZoneInfo
+
+    prefix = Path(prefix)
+    timestamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d-%H%M%S-%f")
+    for attempt in range(1000):
+        suffix = f"-{attempt}" if attempt else ""
+        directory = prefix.with_name(f"{prefix.name}-{timestamp}{suffix}")
+        try:
+            directory.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            continue
+        return directory
+    raise FileExistsError(f"Cannot create a unique output directory for {prefix}")
+
+
 def format_progress(row, index, total):
     prefix = f"[{index}/{total}] {row['case_id']}"
     if row["status"] == "failed":
@@ -225,7 +243,10 @@ def main(argv=None):
 
     parser = argparse.ArgumentParser(description="Single-NPU paged cache write benchmark, no clock lock")
     parser.add_argument("--device", type=int, default=0, help="logical NPU index visible to this process")
-    parser.add_argument("--run-dir", type=Path, required=True, help="new output directory")
+    parser.add_argument(
+        "--run-dir", type=Path, default=Path("results/paged-cache-write"),
+        help="output directory prefix; automatically appends Shanghai date/time",
+    )
     parser.add_argument("--case-regex", default=".*")
     parser.add_argument("--sweep", action="store_true", help="also compare row/core configurations")
     parser.add_argument("--verify-only", action="store_true")
@@ -259,7 +280,8 @@ def main(argv=None):
     selected = [case for case in cases(PagedKVCacheWriteFwdOp) if pattern.search(case.id)]
     if not selected:
         parser.error("case regex matched no workloads")
-    args.run_dir.mkdir(parents=True, exist_ok=False)
+    args.run_dir = create_run_directory(args.run_dir)
+    print(f"结果目录：{args.run_dir.resolve()}", flush=True)
     metadata = {
         "device": str(device),
         "device_name": torch.npu.get_device_name(args.device),

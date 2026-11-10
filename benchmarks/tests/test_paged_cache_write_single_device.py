@@ -103,6 +103,23 @@ class TimerTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    def test_timestamped_directory_collision_preserves_previous_run(self):
+        import zoneinfo  # noqa: F401 -- load datetime's C API before replacing the clock
+
+        fake_datetime = types.SimpleNamespace(datetime=types.SimpleNamespace(
+            now=lambda tz: types.SimpleNamespace(strftime=lambda fmt: "20261110-183000-123456")
+        ))
+        with tempfile.TemporaryDirectory() as temporary:
+            prefix = Path(temporary) / "card3"
+            with patch.dict("sys.modules", {"datetime": fake_datetime}):
+                first = BENCH.create_run_directory(prefix)
+                (first / "summary.md").write_text("previous run")
+                second = BENCH.create_run_directory(prefix)
+            self.assertEqual(first.name, "card3-20261110-183000-123456")
+            self.assertNotEqual(first, second)
+            self.assertTrue(second.is_dir())
+            self.assertEqual((first / "summary.md").read_text(), "previous run")
+
     def test_console_progress_is_concise(self):
         row = {
             "case_id": "decode", "status": "measured",
