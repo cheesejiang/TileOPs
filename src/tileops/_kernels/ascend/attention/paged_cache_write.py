@@ -17,7 +17,7 @@ from tileops._kernels.kernel_base import Kernel
 
 
 @T.macro
-def _quantize_rows(raw, packed, scale, elements: int):
+def _quantize_rows(raw, packed, scale, elements: int, dtype: str):
     """Exact division and saturated E4M3FN, including signed NaN bytes.
 
     UNPK_B16 puts 64 input halves into the low halves of 64 b32 lanes.
@@ -31,11 +31,11 @@ def _quantize_rows(raw, packed, scale, elements: int):
         hi = T.simd.vdup(T.float32(448), "float32")
         sign_mask = T.simd.vdup(T.uint32(128), "uint32")
         nan_code = T.simd.vdup(T.uint32(127), "uint32")
-        magnitude_mask = T.simd.vdup(T.uint32(0x7FFFFFFF), "uint32")
+        magnitude_mask = T.simd.vdup(T.uint32(0x7FFF), "uint32")
+        infinity = T.uint32(0x7C00 if dtype == "float16" else 0x7F80)
         for part in T.serial(elements // 64):
-            original = T.simd.vcvt(
-                T.simd.vld(raw[part * 64], dist="UNPK_B16"), "float32", part=0
-            )
+            loaded = T.simd.vld(raw[part * 64], dist="UNPK_B16")
+            original = T.simd.vcvt(loaded, "float32", part=0)
             wide = T.simd.vdiv(original, divisor, full, precision="exact")
             # Ordered comparisons leave NaNs alone. Repair their output bytes
             # explicitly instead of depending on the native cast's NaN mode.
@@ -44,13 +44,16 @@ def _quantize_rows(raw, packed, scale, elements: int):
             converted = T.simd.vcvt(
                 bounded, "float8_e4m3fn", full, round="ROUND_R", sat=True, part=0
             )
-            original_bits = T.reinterpret(original, "uint32x64")
+            # UNPK_B16 leaves each original 16-bit encoding in the low half
+            # of a b32 lane. Read it BEFORE vcvt: hardware float conversion
+            # can canonicalize a negative NaN to a positive NaN.
+            original_bits = T.reinterpret(loaded, "uint32x64")
             magnitude = T.simd.vand(original_bits, magnitude_mask, full)
             # Detect NaNs using integer bits: floating x != x can be folded
             # under finite-math assumptions or use ordered compare semantics.
-            is_nan = T.simd.vcmps(magnitude, T.uint32(0x7F800000), full, "gt")
+            is_nan = T.simd.vcmps(magnitude, infinity, full, "gt")
             sign = T.simd.vand(
-                T.simd.vshrs(original_bits, 24, full),
+                T.simd.vshrs(original_bits, 8, full),
                 sign_mask,
                 full,
             )
@@ -110,8 +113,8 @@ def batched_program(width, physical_rows, dtype, quantized, rows=16, cores=64):
                         T.copy(K[start : start + rows, :], rawk)
                         T.copy(V[start : start + rows, :], rawv)
                         T.copy(Slots[start : start + rows], slots)
-                        _quantize_rows(flatk, qk, ks, elements)
-                        _quantize_rows(flatv, qv, vs, elements)
+                        _quantize_rows(flatk, qk, ks, elements, dtype)
+                        _quantize_rows(flatv, qv, vs, elements, dtype)
                         for r in T.serial(rows):
                             slot = slots[r]
                             if slot >= 0:
@@ -180,6 +183,7 @@ def build(width, physical_rows, dtype, quantized):
     tile = min(1024, (width + 63) // 64 * 64)
     columns = (width + tile - 1) // tile
     cache_dtype = "uint8" if quantized else dtype
+    infinity_bits = 0x7C00 if dtype == "float16" else 0x7F80
     if quantized:
 
         @T.prim_func
@@ -254,15 +258,13 @@ def build(width, physical_rows, dtype, quantized):
                             with T.SimtVF(threads=256):
                                 for i in T.Parallel(tile):
                                     if i < count:
-                                        if T.isnan(T.float32(rawk[i])):
-                                            sign = (
-                                                T.reinterpret(T.float32(rawk[i]), "uint32") >> 24
-                                            ) & T.uint32(128)
+                                        k_bits = T.cast(T.reinterpret(rawk[i], "uint16"), "uint32")
+                                        v_bits = T.cast(T.reinterpret(rawv[i], "uint16"), "uint32")
+                                        if (k_bits & T.uint32(0x7FFF)) > T.uint32(infinity_bits):
+                                            sign = (k_bits >> 8) & T.uint32(128)
                                             qk[i] = T.cast(sign | T.uint32(127), "uint8")
-                                        if T.isnan(T.float32(rawv[i])):
-                                            sign = (
-                                                T.reinterpret(T.float32(rawv[i]), "uint32") >> 24
-                                            ) & T.uint32(128)
+                                        if (v_bits & T.uint32(0x7FFF)) > T.uint32(infinity_bits):
+                                            sign = (v_bits >> 8) & T.uint32(128)
                                             qv[i] = T.cast(sign | T.uint32(127), "uint8")
                             T.copy(qk[:count], KP[slot, col : col + count])
                             T.copy(qv[:count], VP[slot, col : col + count])
