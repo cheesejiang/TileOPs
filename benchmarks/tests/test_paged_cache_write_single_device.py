@@ -103,6 +103,27 @@ class TimerTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    def test_console_progress_is_concise(self):
+        row = {
+            "case_id": "decode", "status": "measured",
+            "implementations": {
+                "tileops": {"measurement": {"latency_ms": 0.002}, "speedup_vs_generic": 2},
+                "generic": {"measurement": {"latency_ms": 0.004}},
+            },
+        }
+        self.assertEqual(
+            BENCH.format_progress(row, 1, 7),
+            "[1/7] decode: 精度通过 | 优化 2.000 µs | 基线 4.000 µs | 加速 2.000×",
+        )
+        self.assertEqual(
+            BENCH.format_progress({"case_id": "odd", "status": "verified"}, 2, 7),
+            "[2/7] odd: 精度通过",
+        )
+        failure = BENCH.format_progress(
+            {"case_id": "bad", "status": "failed", "error": "Traceback\nRuntimeError: bad"}, 3, 7
+        )
+        self.assertEqual(failure, "[3/7] bad: 失败 — RuntimeError: bad")
+
     def metadata(self, verify_only=False):
         return {
             "device": "npu:3", "device_name": "Ascend950",

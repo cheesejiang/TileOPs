@@ -55,6 +55,25 @@ def candidates(op_name, case, *, sweep=True):
     return result
 
 
+def format_progress(row, index, total):
+    prefix = f"[{index}/{total}] {row['case_id']}"
+    if row["status"] == "failed":
+        error = row.get("error", "").strip().splitlines()
+        reason = error[-1] if error else "详见结果文件"
+        return f"{prefix}: 失败 — {reason}"
+    if row["status"] == "verified":
+        return f"{prefix}: 精度通过"
+    implementations = row["implementations"]
+    optimized = implementations["tileops"]
+    baseline = implementations["generic"]
+    return (
+        f"{prefix}: 精度通过 | "
+        f"优化 {optimized['measurement']['latency_ms'] * 1000:.3f} µs | "
+        f"基线 {baseline['measurement']['latency_ms'] * 1000:.3f} µs | "
+        f"加速 {optimized['speedup_vs_generic']:.3f}×"
+    )
+
+
 def write_summary(directory, metadata, rows, *, complete):
     """Publish a readable report after each case, including partial/failed runs."""
     import math
@@ -259,7 +278,8 @@ def main(argv=None):
     )
     failed = 0
     with (args.run_dir / "results.jsonl").open("x") as output:
-        for case in selected:
+        for index, case in enumerate(selected, 1):
+            print(f"[{index}/{len(selected)}] 正在测试 {case.id} ...", flush=True)
             row = {"case_id": case.id, "device": str(device)}
             try:
                 # Seed the selected device only; do not initialize other NPUs.
@@ -294,10 +314,12 @@ def main(argv=None):
             output.flush()
             report_rows.append(row)
             write_summary(args.run_dir, metadata, report_rows, complete=False)
-            print(json.dumps(row, default=str), flush=True)
+            print(format_progress(row, index, len(selected)), flush=True)
     summary = {"status": "failed" if failed else "passed", "cases": len(selected), "failed": failed}
     (args.run_dir / "result.json").write_text(json.dumps(summary, indent=2))
     write_summary(args.run_dir, metadata, report_rows, complete=True)
+    print(f"完成：通过 {len(selected) - failed}，失败 {failed}。", flush=True)
+    print(f"汇总报告：{(args.run_dir / 'summary.md').resolve()}", flush=True)
     return 1 if failed else 0
 
 
