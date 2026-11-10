@@ -1,4 +1,9 @@
-"""Dynamic-token paged K/V scatter, including saturated FP8 storage."""
+"""Paged K/V scatter for Ascend 950.
+
+Aligned rows use batched GM->UB reads and per-slot UB->GM writes. Small
+decode calls use one row per core; larger calls amortize input DMA and VF
+entry over several rows. The original column-tiled kernel handles other widths.
+"""
 
 import functools
 from typing import ClassVar
@@ -9,6 +14,158 @@ import torch
 
 from tileops._kernels.attention.call_spec import PagedKVCacheWriteFwdInterface
 from tileops._kernels.kernel_base import Kernel
+
+
+@T.macro
+def _quantize_rows(raw, packed, scale, elements: int):
+    """Exact division and saturated E4M3FN, including signed NaN bytes.
+
+    UNPK_B16 puts 64 input halves into the low halves of 64 b32 lanes.
+    The FP8 conversion leaves its result in byte zero of each b32 lane;
+    PK4_B32 compacts these bytes into 64 consecutive output bytes.
+    """
+    with T.SimdVF():
+        full = T.simd.pset(32)
+        divisor = T.simd.vdup(scale[0], "float32")
+        lo = T.simd.vdup(T.float32(-448), "float32")
+        hi = T.simd.vdup(T.float32(448), "float32")
+        sign_mask = T.simd.vdup(T.uint32(128), "uint32")
+        nan_code = T.simd.vdup(T.uint32(127), "uint32")
+        for part in T.serial(elements // 64):
+            original = T.simd.vcvt(
+                T.simd.vld(raw[part * 64], dist="UNPK_B16"), "float32", part=0
+            )
+            wide = T.simd.vdiv(original, divisor, full, precision="exact")
+            # Ordered comparisons leave NaNs alone. Repair their output bytes
+            # explicitly instead of depending on the native cast's NaN mode.
+            low = T.simd.vsel(lo, wide, T.simd.vcmp(wide, lo, full, "lt"))
+            bounded = T.simd.vsel(hi, low, T.simd.vcmp(low, hi, full, "gt"))
+            converted = T.simd.vcvt(
+                bounded, "float8_e4m3fn", full, round="ROUND_R", sat=True, part=0
+            )
+            sign = T.simd.vand(
+                T.simd.vshrs(T.reinterpret(original, "uint32x64"), 24, full),
+                sign_mask,
+                full,
+            )
+            bits = T.simd.vsel(
+                T.simd.vor(sign, nan_code, full),
+                T.reinterpret(converted, "uint32x64"),
+                T.simd.vcmp(original, original, full, "ne"),
+            )
+            T.simd.vsts(
+                packed[part * 64], T.reinterpret(bits, "uint8x256"), full, "PK4_B32"
+            )
+
+
+def batched_program(width, physical_rows, dtype, quantized, rows=16, cores=64):
+    """Build a PrimFunc separately from compilation for inspection and tuning.
+
+    Only full row tiles enter this kernel. The Python launcher routes partial
+    tiles to the generic implementation, so no uninitialized UB lane is read.
+    16x1024 native16 K/V rows occupy 64 KiB of UB in total.
+    """
+    if width <= 0 or width % 64 or rows < 1 or rows * width > 16384:
+        raise ValueError("batched rows require a 64-aligned width and at most 16384 elements")
+    if cores < 1 or cores > 64:
+        raise ValueError("Ascend950 vector core count must be in [1, 64]")
+    tokens = T.dynamic("tokens")
+    elements = rows * width
+    cache_dtype = "uint8" if quantized else dtype
+
+    if quantized:
+
+        @T.prim_func
+        def main(
+            K: T.Tensor((tokens, width), dtype),
+            V: T.Tensor((tokens, width), dtype),
+            KP: T.Tensor((physical_rows, width), cache_dtype),
+            VP: T.Tensor((physical_rows, width), cache_dtype),
+            Slots: T.Tensor((tokens,), "int64"),
+            KS: T.Tensor((1,), "float32"),
+            VS: T.Tensor((1,), "float32"),
+        ):
+            T.func_attr({"tilelang_callee_allocated_outputs": 0})
+            with T.Kernel(cores) as bx:
+                rawk = T.alloc_shared((rows, width), dtype)
+                flatk = T.view(rawk, (elements,))
+                rawv = T.alloc_shared((rows, width), dtype)
+                flatv = T.view(rawv, (elements,))
+                qk = T.alloc_shared((elements,), "uint8")
+                qv = T.alloc_shared((elements,), "uint8")
+                slots = T.alloc_shared((rows,), "int64")
+                ks = T.alloc_shared((1,), "float32")
+                vs = T.alloc_shared((1,), "float32")
+                T.copy(KS, ks)
+                T.copy(VS, vs)
+                for step in T.serial(T.ceildiv(tokens // rows, cores)):
+                    start = (step * cores + bx) * rows
+                    if start < tokens:
+                        T.copy(K[start : start + rows, :], rawk)
+                        T.copy(V[start : start + rows, :], rawv)
+                        T.copy(Slots[start : start + rows], slots)
+                        _quantize_rows(flatk, qk, ks, elements)
+                        _quantize_rows(flatv, qv, vs, elements)
+                        for r in T.serial(rows):
+                            slot = slots[r]
+                            if slot >= 0:
+                                T.copy(qk[r * width : (r + 1) * width], KP[slot, :])
+                                T.copy(qv[r * width : (r + 1) * width], VP[slot, :])
+    else:
+
+        @T.prim_func
+        def main(
+            K: T.Tensor((tokens, width), dtype),
+            V: T.Tensor((tokens, width), dtype),
+            KP: T.Tensor((physical_rows, width), dtype),
+            VP: T.Tensor((physical_rows, width), dtype),
+            Slots: T.Tensor((tokens,), "int64"),
+        ):
+            T.func_attr({"tilelang_callee_allocated_outputs": 0})
+            with T.Kernel(cores) as bx:
+                rawk = T.alloc_shared((rows, width), dtype)
+                rawv = T.alloc_shared((rows, width), dtype)
+                slots = T.alloc_shared((rows,), "int64")
+                for step in T.serial(T.ceildiv(tokens // rows, cores)):
+                    start = (step * cores + bx) * rows
+                    if start < tokens:
+                        T.copy(K[start : start + rows, :], rawk)
+                        T.copy(V[start : start + rows, :], rawv)
+                        T.copy(Slots[start : start + rows], slots)
+                        for r in T.serial(rows):
+                            slot = slots[r]
+                            if slot >= 0:
+                                T.copy(rawk[r, :], KP[slot, :])
+                                T.copy(rawv[r, :], VP[slot, :])
+    return main
+
+
+@functools.lru_cache(maxsize=64)
+def build_batched(width, physical_rows, dtype, quantized, rows=16, cores=64):
+    return tilelang.compile(
+        batched_program(width, physical_rows, dtype, quantized, rows, cores),
+        target="ascend",
+        out_idx=[],
+    )
+
+
+def launch_config(tokens, width, quantized):
+    """Conservative starting points; benchmark row batches on the target machine.
+
+    N stays dynamic inside each program. Selecting a small finite family here
+    does not cache a separate executable for every decode batch size.
+    """
+    if tokens <= 0 or width not in (128, 512, 1024):
+        return None
+    if tokens <= 64:
+        rows = 1
+    elif tokens < 1024:
+        rows = 4
+    else:
+        rows = 8 if quantized else 16
+    if tokens % rows:
+        return None
+    return rows, min(64, tokens // rows)
 
 
 @functools.lru_cache(maxsize=64)
@@ -143,12 +300,7 @@ class AscendPagedKVCacheWriteKernel(Kernel, PagedKVCacheWriteFwdInterface):
     def __init__(self, call):
         super().__init__()
         self.call = call
-        self.compiled = build(
-            call.row_width,
-            call.physical_tokens,
-            str(call.dtype).removeprefix("torch."),
-            call.quantized,
-        )
+        self.dtype = str(call.dtype).removeprefix("torch.")
 
     def forward(self, k, v, k_pages, v_pages, slot_mapping, k_scale=None, v_scale=None):
         n = k.shape[0]
@@ -167,7 +319,12 @@ class AscendPagedKVCacheWriteKernel(Kernel, PagedKVCacheWriteFwdInterface):
         ]
         if self.call.quantized:
             args.extend([k_scale, v_scale])
-        self.compiled(*args)
+        config = launch_config(n, width, self.call.quantized)
+        if config is None:
+            compiled = build(width, physical, self.dtype, self.call.quantized)
+        else:
+            compiled = build_batched(width, physical, self.dtype, self.call.quantized, *config)
+        compiled(*args)
         return None
 
 
