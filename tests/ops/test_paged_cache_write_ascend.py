@@ -40,7 +40,9 @@ def _selected_device():
 def test_scatter(n, h, d, npages, page, dtype, fp8):
     import torch_npu  # noqa: F401
 
+    from tileops import ascend  # noqa: F401 -- register kernels in source-tree runs
     from tileops.attention import PagedKVCacheWriteFwdOp
+    from tileops.backend import BUILTIN
 
     if not torch.npu.is_available():
         pytest.skip("no NPU available")
@@ -70,7 +72,7 @@ def test_scatter(n, h, d, npages, page, dtype, fp8):
         )
         expected.append(result)
     args = [x.to(device) if x is not None else None for x in (k, v, kp, vp, slots, ks, vs)]
-    assert PagedKVCacheWriteFwdOp(target="ascend")(*args) is None
+    assert PagedKVCacheWriteFwdOp(target=BUILTIN)(*args) is None
     torch.npu.synchronize(device)
     for actual, reference in zip(args[2:4], expected, strict=True):
         assert torch.equal(actual.cpu().view(torch.uint8), reference.view(torch.uint8))

@@ -230,7 +230,9 @@ def main(argv=None):
     from benchmarks.api import cases
     from benchmarks.ascend.runner import benchmark_case
     from benchmarks.baselines import private_inputs
+    from tileops import ascend  # noqa: F401 -- register kernels in source-tree runs
     from tileops.attention import PagedKVCacheWriteFwdOp
+    from tileops.backend import BUILTIN
     from workloads.attention.paged_cache_write import paged_cache_write_result
     from workloads.device import set_run_device
 
@@ -265,7 +267,7 @@ def main(argv=None):
                 with torch.npu.device(device):
                     torch.npu.manual_seed(20261110)
                 inputs = case.inputs
-                op = PagedKVCacheWriteFwdOp(target="ascend")
+                op = PagedKVCacheWriteFwdOp(target=BUILTIN)
 
                 def run(*inputs):
                     return paged_cache_write_result(op, *inputs)
