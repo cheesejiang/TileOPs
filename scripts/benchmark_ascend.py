@@ -16,6 +16,7 @@ def main():
         "--run-dir", type=Path, required=True, help="new directory; existing output is never reused"
     )
     parser.add_argument("--owner", required=True)
+    parser.add_argument("--device", type=int, default=0, help="Physical NPU ID (default 0)")
     parser.add_argument("--wait", type=int, default=600)
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument(
@@ -27,6 +28,8 @@ def main():
     args, rest = parser.parse_known_args()
     if "--help" in rest:
         return 0
+    if not 0 <= args.device < 65536:
+        parser.error("--device must be in 0..65535")
     run = args.run_dir.resolve()
     run.mkdir(parents=True, exist_ok=False)
     root = Path(__file__).resolve().parents[1]
@@ -37,6 +40,8 @@ def main():
         sys.executable,
         str(guard),
         "run",
+        "--device",
+        str(args.device),
         "--owner",
         args.owner,
         "--wait",
@@ -63,6 +68,7 @@ def main():
         "started_at": started,
         "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "command": command,
+        "physical_device": args.device,
         "result": summary,
     }
     (run / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")

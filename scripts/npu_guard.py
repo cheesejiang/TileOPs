@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host-wide cooperative reservation for this machine's single Ascend NPU.
+"""Host-wide cooperative reservation for one selected physical Ascend NPU.
 
 Only the Python standard library is required. See docs/ascend950/development.md.
 """
@@ -20,7 +20,6 @@ import time
 from pathlib import Path
 
 LOCK_DIR = Path("/run/lock/ascend-npu")
-LOCK_NAME = "device-0.lock"
 DRIVER = "/usr/local/Ascend/driver/lib64/driver/libdrvdsmi_host.so"
 SCRIPT = str(Path(__file__).resolve())
 PROBE_SCRIPTS = {SCRIPT, "/usr/local/bin/npu-guard"}
@@ -77,7 +76,7 @@ def readonly_guard_probe(entry):
     try:
         args = (entry / "cmdline").read_bytes().rstrip(b"\0").split(b"\0")
         return (
-            len(args) == 3
+            (len(args) == 3 or (len(args) == 5 and args[3] == b"--device" and args[4].isdigit()))
             and args[2] == b"_probe"
             and os.path.realpath(os.fsdecode(args[1])) in PROBE_SCRIPTS
         )
@@ -85,7 +84,7 @@ def readonly_guard_probe(entry):
         return False
 
 
-def scan_device_fds(proc=Path("/proc")):
+def scan_device_fds(proc=Path("/proc"), device=0):
     """Conservatively include runtime initialization, not just /dev/davinci0.
 
     A manager/HDC FD is a candidate, not proof of compute activity. An
@@ -104,7 +103,12 @@ def scan_device_fds(proc=Path("/proc")):
                     continue
                 if target.startswith(("/dev/davinci", "/dev/devmm", "/dev/hisi_hdc")):
                     nodes.add(target)
-            if nodes and not readonly_guard_probe(entry):
+            # Ignore processes explicitly using other cards. Manager-only
+            # handles remain candidates until their target becomes observable.
+            compute = {n for n in nodes if n.removeprefix("/dev/davinci").isdigit()
+                       and n.startswith("/dev/davinci")}
+            relevant = f"/dev/davinci{device}" in compute or (nodes and not compute)
+            if relevant and not readonly_guard_probe(entry):
                 candidates.append({**proc_identity(int(entry.name)), "nodes": sorted(nodes)})
         except (FileNotFoundError, ProcessLookupError):
             continue
@@ -140,18 +144,18 @@ def classify(sample):
     return "idle", ["no driver processes or Ascend FD candidates in this sample"]
 
 
-def raw_probe():
+def raw_probe(device=0):
     """Read-only DSMI calls in a disposable process, using installed ABI headers.
 
     dsmi_common_interface.h: PROCESS_RESOURCE=2, DEV_PROCESS_PID=8.
     Ascend950 asys handler: get_device_info(MEMORY=9, HBM_MEMORY=35).
     Never initialize torch/ACL, submit work, reset, or alter device settings.
     """
-    result = {"time": now(), "device": 0, "errors": [], "utilization": {}}
+    result = {"time": now(), "device": device, "errors": [], "utilization": {}}
     try:
         devices = sorted(str(p) for p in Path("/dev").glob("davinci[0-9]*"))
-        if devices != ["/dev/davinci0"]:
-            result["errors"].append(f"expected only /dev/davinci0; found {devices}")
+        if f"/dev/davinci{device}" not in devices:
+            result["errors"].append(f"missing /dev/davinci{device}; found {devices}")
         lib = C.CDLL(DRIVER)
         lib.dsmi_get_resource_info.argtypes = [
             C.c_uint,
@@ -172,7 +176,7 @@ def raw_probe():
         pids = (C.c_int * 64)()
         para = ResourcePara(2, 0, 8, 0)
         info = ResourceInfo(C.sizeof(pids), C.cast(pids, C.c_void_p))
-        rc = lib.dsmi_get_resource_info(0, C.byref(para), C.byref(info))
+        rc = lib.dsmi_get_resource_info(device, C.byref(para), C.byref(info))
         result["pid_query_rc"] = rc
         result["pids"] = [proc_identity(pid) for pid in pids if pid > 0] if rc == 0 else []
         if rc == 0 and (info.buf_len > C.sizeof(pids) or any(pid < 0 for pid in pids)):
@@ -180,7 +184,7 @@ def raw_probe():
         if len(result["pids"]) == 64:
             result["errors"].append("process list may be truncated")
         health = C.c_uint()
-        rc = lib.dsmi_get_device_health(0, C.byref(health))
+        rc = lib.dsmi_get_device_health(device, C.byref(health))
         result["health"] = {"rc": rc, "value": health.value}
         for kind, name in [
             (2, "aicore"),
@@ -190,7 +194,7 @@ def raw_probe():
             (14, "cube"),
         ]:
             value = C.c_uint()  # Some current driver paths write only the low byte.
-            rc = lib.dsmi_get_device_utilization_rate(0, kind, C.byref(value))
+            rc = lib.dsmi_get_device_utilization_rate(device, kind, C.byref(value))
             result["utilization"][name] = {"rc": rc, "value": value.value}
             if rc == 0 and value.value > 100:
                 result["errors"].append(f"invalid {name} utilization")
@@ -198,7 +202,7 @@ def raw_probe():
             result["errors"].append("NPU overall utilization query failed")
         mem = MemoryInfo()
         size = C.c_uint(C.sizeof(mem))
-        rc = lib.dsmi_get_device_info(0, 9, 35, C.byref(mem), C.byref(size))
+        rc = lib.dsmi_get_device_info(device, 9, 35, C.byref(mem), C.byref(size))
         result["memory"] = {
             "rc": rc,
             "total_mib": mem.total_kib / 1024,
@@ -207,22 +211,22 @@ def raw_probe():
         result["core_frequency"] = []
         for component in (0, 1):
             freq = CoreFrequency()
-            rc = lib.dsmi_get_aicore_info(component << 16, C.byref(freq))
+            rc = lib.dsmi_get_aicore_info((component << 16) | device, C.byref(freq))
             result["core_frequency"].append({"rc": rc, "mhz": freq.current_mhz})
         power = C.c_ushort()
-        rc = lib.dsmi_get_device_power_info(0, C.byref(power))
+        rc = lib.dsmi_get_device_power_info(device, C.byref(power))
         result["power"] = {"rc": rc, "watts": power.value / 10}
     except (OSError, AttributeError) as exc:
         result["errors"].append(str(exc))
-    result["fd_candidates"], result["unreadable_proc_pids"] = scan_device_fds()
+    result["fd_candidates"], result["unreadable_proc_pids"] = scan_device_fds(device=device)
     result["state"], result["reasons"] = classify(result)
     return result
 
 
-def probe():
+def probe(device=0):
     try:
         completed = subprocess.run(
-            [sys.executable, SCRIPT, "_probe"],
+            [sys.executable, SCRIPT, "_probe", "--device", str(device)],
             capture_output=True,
             text=True,
             timeout=10,
@@ -246,7 +250,7 @@ def probe():
         return {"time": now(), "state": "unknown", "reasons": [f"probe failed: {exc}"]}
 
 
-def open_lock():
+def open_lock(device=0):
     """Root creates a persistent inode. Clients never unlink or replace it."""
     if not LOCK_DIR.exists():
         if os.geteuid() != 0:
@@ -256,7 +260,7 @@ def open_lock():
     directory = LOCK_DIR.lstat()
     if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != 0 or directory.st_mode & 0o022:
         raise PermissionError(f"{LOCK_DIR} must be a root-owned, non-writable real directory")
-    path = LOCK_DIR / LOCK_NAME
+    path = LOCK_DIR / f"device-{device}.lock"
     if os.geteuid() == 0:
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o666)
@@ -335,13 +339,17 @@ def execute(fd, metadata, command, timeout, grace=5, sample_fn=probe):
     not release the reservation while the immediate child is still alive.
     Surviving runtime processes are also caught by the next physical probe.
     """
+    if sample_fn is probe:
+        sample_fn = lambda: probe(metadata.get("device", 0))
     received = []
     old_handlers = {}
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         old_handlers[sig] = signal.signal(sig, lambda number, frame: received.append(number))
     child = None
     try:
-        env = dict(os.environ, ASCEND_RT_VISIBLE_DEVICES="0", ASCEND_VISIBLE_DEVICES="0")
+        device = str(metadata.get("device", 0))
+        env = dict(os.environ, ASCEND_RT_VISIBLE_DEVICES=device,
+                   ASCEND_VISIBLE_DEVICES=device, TILEOPS_NPU_DEVICE=device)
         # A fresh session permits terminating only this invocation's process group.
         child = subprocess.Popen(command, pass_fds=(fd,), start_new_session=True, env=env)
         metadata.update(phase="running", child=proc_identity(child.pid))
@@ -407,13 +415,16 @@ def run(args, sample_fn=probe):
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         raise ValueError("provide a foreground command after --")
-    fd = open_lock()
+    device = getattr(args, "device", 0)
+    if sample_fn is probe:
+        sample_fn = lambda: probe(device)
+    fd = open_lock(device)
     acquired = False
     metadata = {
         **proc_identity(os.getpid()),
         "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
         "owner": args.owner,
-        "device": 0,
+        "device": device,
         "command": Path(command[0]).name,
         "phase": "waiting_lock",
         "requested_at": now(),
@@ -438,7 +449,7 @@ def run(args, sample_fn=probe):
                     if quiet_since is None:
                         quiet_since = time.monotonic()
                     if time.monotonic() - quiet_since >= args.idle_seconds:
-                        emit(f"acquired device 0 for {args.owner}")
+                        emit(f"acquired device {device} for {args.owner}")
                         result = execute(fd, metadata, command, args.timeout, sample_fn=sample_fn)
                         metadata.update(phase="finished", exit_code=result)
                         return result
@@ -469,10 +480,10 @@ def run(args, sample_fn=probe):
             os.close(fd)
 
 
-def status(as_json):
-    sample = probe()
+def status(as_json, device=0):
+    sample = probe(device)
     try:
-        fd = open_lock()
+        fd = open_lock(device)
     except OSError as exc:
         sample["reservation"] = {"error": str(exc)}
         sample["state"] = "unknown"
@@ -489,7 +500,7 @@ def status(as_json):
     if as_json:
         print(json.dumps(sample, ensure_ascii=False))
     else:
-        print(f"device 0: {sample['state']}")
+        print(f"device {device}: {sample['state']}")
         print(json.dumps(sample, ensure_ascii=False, indent=2))
     return {"idle": 0, "busy": BUSY, "unknown": UNAVAILABLE}[sample["state"]]
 
@@ -504,7 +515,7 @@ def finite_number(value):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     subs = parser.add_subparsers(dest="action", required=True)
-    subs.add_parser("init", help="root: initialize the host lock after boot")
+    init = subs.add_parser("init", help="root: initialize the host lock after boot")
     state = subs.add_parser("status", help="read-only device and reservation snapshot")
     state.add_argument("--json", action="store_true")
     job = subs.add_parser(
@@ -525,19 +536,23 @@ def main():
         "--timeout", type=finite_number, help="workload wall time; kills only its process group"
     )
     job.add_argument("command", nargs=argparse.REMAINDER)
-    subs.add_parser("_probe", help=argparse.SUPPRESS)
+    internal = subs.add_parser("_probe", help=argparse.SUPPRESS)
+    for sub in (init, state, job, internal):
+        sub.add_argument("--device", type=int, default=0, help="Physical NPU ID (default 0)")
     args = parser.parse_args()
+    if not 0 <= args.device < 65536:
+        parser.error("--device must be in 0..65535")
     try:
         if args.action == "_probe":
-            print(json.dumps(raw_probe(), ensure_ascii=False))
+            print(json.dumps(raw_probe(args.device), ensure_ascii=False))
             return 0
         if args.action == "init":
-            fd = open_lock()
+            fd = open_lock(args.device)
             os.close(fd)
-            print(LOCK_DIR / LOCK_NAME)
+            print(LOCK_DIR / f"device-{args.device}.lock")
             return 0
         if args.action == "status":
-            return status(args.json)
+            return status(args.json, args.device)
         if args.poll <= 0:
             parser.error("--poll must be positive")
         return run(args)

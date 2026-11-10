@@ -19,7 +19,11 @@ class _Frequency(ctypes.Structure):
 
 class ClockPolicy:
     def __init__(self, config: Path):
+        self.device = require_reservation()["device"]
         self.spec = json.loads(config.read_text())
+        declared = self.spec.get("device")
+        if declared is not None and declared != self.device:
+            raise ValueError("Clock policy device does not match the reserved physical NPU")
         self.targets = self.spec["component_mhz"]
         if len(self.targets) != 2 or any(type(v) is not int or v <= 0 for v in self.targets):
             raise ValueError("component_mhz must contain two positive integer frequencies")
@@ -29,6 +33,9 @@ class ClockPolicy:
                 raise ValueError(f"{name} must be an argv array")
             if not Path(argv[0]).is_absolute():
                 raise ValueError(f"{name} executable must be an absolute path")
+            if self.device != 0 and declared is None and not any("{device}" in v for v in argv):
+                raise ValueError("Nonzero NPU requires a device-specific clock policy or {device} argv")
+            self.spec[name] = [v.replace("{device}", str(self.device)) for v in argv]
         self.driver = ctypes.CDLL(
             self.spec.get("driver", "/usr/local/Ascend/driver/lib64/driver/libdrvdsmi_host.so")
         )
@@ -41,7 +48,9 @@ class ClockPolicy:
         # The 950 exposes the two components in the high 16 bits of the DSMI device ID.
         for device in (0, 1):
             info = _Frequency()
-            rc = self.driver.dsmi_get_aicore_info(device << 16, ctypes.byref(info))
+            rc = self.driver.dsmi_get_aicore_info(
+                (device << 16) | self.device, ctypes.byref(info)
+            )
             if rc:
                 raise RuntimeError(f"Cannot query component {device} frequency: {rc}")
             values.append({"rated_mhz": info.rated_mhz, "mhz": info.current_mhz})

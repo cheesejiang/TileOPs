@@ -10,7 +10,11 @@ LOCK_PATH = Path("/run/lock/ascend-npu/device-0.lock")
 
 def require_reservation() -> dict:
     """Reject bare execution, stale metadata, or another process's reservation."""
-    with LOCK_PATH.open("r") as handle:
+    device = int(os.environ.get("TILEOPS_NPU_DEVICE", "0"))
+    if not 0 <= device < 65536:
+        raise RuntimeError("Invalid physical NPU ID")
+    path = LOCK_PATH.with_name(f"device-{device}.lock")
+    with path.open("r") as handle:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -21,6 +25,8 @@ def require_reservation() -> dict:
                 "Run the whole command through scripts/benchmark_ascend.py or npu-guard"
             )
         meta = json.load(handle)
+    if meta.get("device") != device:
+        raise RuntimeError("NPU reservation device does not match the selected device")
     ancestors = set()
     pid = os.getpid()
     while pid > 1:

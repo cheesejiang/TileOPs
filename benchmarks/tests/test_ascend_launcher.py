@@ -29,6 +29,8 @@ class LauncherRoutingTest(unittest.TestCase):
                 str(run),
                 "--owner",
                 "test/site-guard",
+                "--device",
+                "3",
                 "--guard",
                 str(guard),
                 "--verify-only",
@@ -38,6 +40,7 @@ class LauncherRoutingTest(unittest.TestCase):
 
             def completed(command, **kwargs):
                 self.assertEqual(command[:3], [sys.executable, str(guard), "run"])
+                self.assertEqual(command[3:5], ["--device", "3"])
                 self.assertIn("benchmarks.ascend.runner", command)
                 self.assertIn("--verify-only", command)
                 self.assertEqual(command[-2:], ["--op", "all"])
@@ -52,6 +55,7 @@ class LauncherRoutingTest(unittest.TestCase):
                 self.assertEqual(launcher.main(), 0)
             receipt = json.loads((run / "receipt.json").read_text())
             self.assertEqual(receipt["guard_exit_code"], 0)
+            self.assertEqual(receipt["physical_device"], 3)
             self.assertEqual(receipt["command"][1], str(guard))
 
 

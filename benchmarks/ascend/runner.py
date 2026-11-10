@@ -134,7 +134,9 @@ def main(argv=None):
     registry.ensure_loaded()
     if registry.LOAD_FAILURES:
         raise RuntimeError(registry.LOAD_FAILURES)
-    set_run_device("npu")
+    # The guard exposes exactly the selected physical card as logical device 0.
+    torch.npu.set_device(0)
+    set_run_device("npu:0")
     device_name = torch.npu.get_device_name(0)
     if "Ascend950" not in device_name:
         raise RuntimeError(f"This protocol requires Ascend 950, got {device_name}")
@@ -159,6 +161,8 @@ def main(argv=None):
         "cann_components": runtime_versions(torch_npu.utils.get_cann_version),
         "python": sys.version,
         "device": device_name,
+        "physical_device": reservation["device"],
+        "logical_device": 0,
         "reservation": reservation,
         "ops": selected,
         "verify_only": args.verify_only,

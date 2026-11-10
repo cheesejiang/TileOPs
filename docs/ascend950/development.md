@@ -61,6 +61,7 @@ manifest cases:
 python scripts/benchmark_ascend.py \
   --owner "$USER/paged-gather-perf" \
   --run-dir "/tmp/paged-gather-perf-$(date +%Y%m%d-%H%M%S)" \
+  --device 3 \
   --op PagedKVCacheGatherFwdOp \
   --unlocked
 ```
@@ -73,6 +74,20 @@ development measurements, not locked performance acceptance. `--unlocked` and
 and `run.log` under the run directory. No Triton/Inductor compilation is requested
 by this benchmark entry point.
 
+`--device N` selects one physical NPU for the entire run (default 0), including
+all selected manifest cases. The guard uses `device-N.lock`, probes that card,
+and exposes it alone to the child, where it is logical `npu:0`. The result
+metadata records both IDs. Other cards' explicit compute handles do not block
+the selected card; processes holding only shared manager handles remain
+conservative initialization candidates. The host administrator initializes each
+selected lock once with `python scripts/npu_guard.py init --device N`.
+
+For locked timing on nonzero cards, use a matching clock policy with a `device`
+field, or put `{device}` in both the lock and restore argv arrays; it is replaced
+with the physical ID. DSMI readbacks query the selected physical card and both
+of its components. Site-provided guards must accept `run --device N` and publish
+the matching reservation and `TILEOPS_NPU_DEVICE` environment variable.
+
 Every developer and baseline adapter uses this entry point from the same revision:
 
 ```bash
@@ -84,7 +99,8 @@ python scripts/benchmark_ascend.py \
 ```
 
 The launcher acquires the host reservation **before runtime imports** and wraps the
-whole foreground process. All users must share `/run/lock/ascend-npu/device-0.lock`.
+whole foreground process. All users share `/run/lock/ascend-npu/device-N.lock`
+for the selected physical card (`device-0.lock` by default).
 The guard checks driver processes, device handles, health and sustained idle before
 launch, and checks for foreign driver activity while running. It is a cooperative
 lock: unrelated programs can ignore it. Never delete a held lock or reset a device to
