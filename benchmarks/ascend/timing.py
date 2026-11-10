@@ -13,6 +13,7 @@ from benchmarks.ascend.guard import require_reservation
 from benchmarks.ascend.profile_parser import _parse_ffts_profile
 
 PROTOCOL = "ascend950-profiler-locked-v1"
+UNLOCKED_PROTOCOL = "ascend950-profiler-unlocked-v1"
 WARMUP = 3
 REPEATS = 15
 FLUSH_BYTES = 1 << 30
@@ -42,15 +43,20 @@ def _profile(directory):
 
 
 class ProfilerTimer:
-    """A timer scoped to one guarded run and one already applied clock policy."""
+    """One guarded run, with an applied clock policy or explicit unlocked mode."""
 
-    def __init__(self, directory: Path, clocks):
+    unlocked = False
+
+    def __init__(self, directory: Path, clocks, *, unlocked=False):
+        if (clocks is None) != unlocked:
+            raise ValueError("provide clocks for locked timing, or explicitly use unlocked=True")
         require_reservation()
         import torch
         from tilelang.profiler.msprof import get_msprof_cache_flush_kernel
 
         self.directory = directory
         self.clocks = clocks
+        self.unlocked = unlocked
         self.flush_buffer = torch.empty(FLUSH_BYTES // 4, dtype=torch.int32, device="npu")
         self.flush = get_msprof_cache_flush_kernel(FLUSH_BYTES // 4, "int32")
         # Resolve the actual compiled name before trusting contamination detection.
@@ -72,7 +78,8 @@ class ProfilerTimer:
             reset()
         self.flush(self.flush_buffer)
         torch.npu.synchronize()
-        self.clocks.check()
+        if self.clocks is not None:
+            self.clocks.check()
 
     def measure(self, fn, args=(), *, reset=None, name="call", search=False):
         """Measure a verified callable; short search records never carry the formal protocol."""
@@ -93,7 +100,8 @@ class ProfilerTimer:
                 torch.npu.synchronize()
                 prof.step()
             del output
-            self.clocks.check()
+            if self.clocks is not None:
+                self.clocks.check()
             parsed = _parse_ffts_profile(
                 Path(prof.prof_if.prof_path), 1, exclude_name_marker=FLUSH_NAME
             )
@@ -107,8 +115,10 @@ class ProfilerTimer:
                 )
             records.append(parsed)
         values = [r["latency_ms"] for r in records]
+        protocol = UNLOCKED_PROTOCOL if self.unlocked else PROTOCOL
         return {
-            "protocol": PROTOCOL if not search else PROTOCOL + "-search",
+            "protocol": protocol if not search else protocol + "-search",
+            "clock_locked": not self.unlocked,
             "profiler": "torch_npu.profiler.profile",
             "metric": "mean_device_busy_union_ms",
             "warmup": warmup,

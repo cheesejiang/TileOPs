@@ -93,7 +93,12 @@ def main(argv=None):
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--op", action="append", required=True)
     parser.add_argument("--case-regex")
-    parser.add_argument("--clock-config", type=Path)
+    clock_options = parser.add_mutually_exclusive_group()
+    clock_options.add_argument("--clock-config", type=Path)
+    clock_options.add_argument(
+        "--unlocked", action="store_true",
+        help="Development timing without setting or checking clocks; results are marked unlocked",
+    )
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--include-reference", action="store_true")
     parser.add_argument(
@@ -108,9 +113,9 @@ def main(argv=None):
         raise KeyboardInterrupt(f"Benchmark interrupted by signal {signum}")
 
     signal.signal(signal.SIGTERM, interrupted)
+    if not args.verify_only and args.clock_config is None and not args.unlocked:
+        parser.error("measurement requires --clock-config or explicit --unlocked")
     reservation = require_reservation()
-    if not args.verify_only and args.clock_config is None:
-        parser.error("formal benchmark requires --clock-config; no unlocked fallback")
     if version("tilelang").split("+", 1)[0] != "0.1.15":
         raise RuntimeError("This protocol requires the official TileLang 0.1.15 release")
     before = source_fingerprint()
@@ -157,6 +162,7 @@ def main(argv=None):
         "reservation": reservation,
         "ops": selected,
         "verify_only": args.verify_only,
+        "unlocked": args.unlocked,
         "clock_policy": json.loads(args.clock_config.read_text()) if args.clock_config else None,
     }
     _write(args.run_dir / "environment.json", metadata)
@@ -167,10 +173,14 @@ def main(argv=None):
 
     passed = failed = 0
     completed = False
-    clock_context = nullcontext() if args.verify_only else ClockPolicy(args.clock_config)
+    clock_context = (
+        nullcontext() if args.verify_only or args.unlocked else ClockPolicy(args.clock_config)
+    )
     try:
         with clock_context as clocks:
-            timer = None if args.verify_only else ProfilerTimer(args.run_dir / "profiles", clocks)
+            timer = None if args.verify_only else ProfilerTimer(
+                args.run_dir / "profiles", clocks, unlocked=args.unlocked
+            )
             with (args.run_dir / "results.jsonl").open("x") as output:
                 for op_name in selected:
                     op_class = getattr(
@@ -219,7 +229,7 @@ def main(argv=None):
                 torch.npu.synchronize()
         completed = True
     finally:
-        if not args.verify_only:
+        if not args.verify_only and not args.unlocked:
             _write(
                 args.run_dir / "clock-readbacks.json",
                 {
@@ -240,6 +250,7 @@ def main(argv=None):
                 "failed": failed,
                 "source_changed": changed,
                 "verify_only": args.verify_only,
+                "unlocked": args.unlocked,
             },
         )
     return 0 if completed and passed and not failed and not changed else 1

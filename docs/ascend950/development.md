@@ -53,6 +53,26 @@ launches; separately measured stages are only diagnostics.
 
 ## Shared benchmark
 
+For development timing without a clock policy file, pass `--unlocked` instead
+of `--clock-config`. For example, to verify and measure all seven paged gather
+manifest cases:
+
+```bash
+python scripts/benchmark_ascend.py \
+  --owner "$USER/paged-gather-perf" \
+  --run-dir "/tmp/paged-gather-perf-$(date +%Y%m%d-%H%M%S)" \
+  --op PagedKVCacheGatherFwdOp \
+  --unlocked
+```
+
+This retains correctness checks, reservation, profiler windows and cache eviction.
+It does not read, set or restore clocks. Measurements carry
+`protocol=ascend950-profiler-unlocked-v1` and `clock_locked=false`; they are
+development measurements, not locked performance acceptance. `--unlocked` and
+`--clock-config` are mutually exclusive. Results and logs are in `results.jsonl`
+and `run.log` under the run directory. No Triton/Inductor compilation is requested
+by this benchmark entry point.
+
 Every developer and baseline adapter uses this entry point from the same revision:
 
 ```bash

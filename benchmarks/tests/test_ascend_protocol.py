@@ -46,6 +46,22 @@ def test_missing_device_records_fail(tmp_path):
         _parse_ffts_profile(tmp_path, 1)
 
 
+@pytest.mark.parametrize("options", [[], ["--unlocked", "--clock-config", "/unused.json"]])
+def test_measurement_requires_one_explicit_clock_mode(monkeypatch, tmp_path, options):
+    from benchmarks.ascend import runner
+
+    monkeypatch.setattr(runner, "require_reservation", lambda: pytest.fail("runtime entered"))
+    with pytest.raises(SystemExit) as error:
+        runner.main(["--run-dir", str(tmp_path), "--op", "PagedKVCacheGatherFwdOp", *options])
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("clocks,unlocked", [(None, False), (object(), True)])
+def test_timer_rejects_inconsistent_clock_mode(clocks, unlocked, tmp_path):
+    with pytest.raises(ValueError, match="provide clocks"):
+        timing.ProfilerTimer(tmp_path, clocks, unlocked=unlocked)
+
+
 def test_flush_name_must_be_resolved_by_self_check(tmp_path):
     (tmp_path / "ffts_profile.slice_0").write_bytes(_record(2000))
     with pytest.raises(RuntimeError, match="never matched"):
@@ -67,7 +83,8 @@ def test_incomplete_correctness_never_reaches_timer(monkeypatch, checked, total,
         benchmark_case(case, {"tileops": impl}, None, name="case")
 
 
-def test_isolated_windows_have_fixed_counts_and_no_event_timer(monkeypatch, tmp_path):
+@pytest.mark.parametrize("unlocked", [False, True])
+def test_isolated_windows_have_fixed_counts_and_no_event_timer(monkeypatch, tmp_path, unlocked):
     import torch
 
     calls = []
@@ -97,7 +114,8 @@ def test_isolated_windows_have_fixed_counts_and_no_event_timer(monkeypatch, tmp_
     )
     timer = timing.ProfilerTimer.__new__(timing.ProfilerTimer)
     timer.directory = tmp_path
-    timer.clocks = SimpleNamespace(check=lambda: calls.append(("clock", active)))
+    timer.unlocked = unlocked
+    timer.clocks = None if unlocked else SimpleNamespace(check=lambda: calls.append(("clock", active)))
     timer.flush_buffer = None
     timer.flush = lambda _: calls.append(("flush", active))
     result = timer.measure(
@@ -105,6 +123,9 @@ def test_isolated_windows_have_fixed_counts_and_no_event_timer(monkeypatch, tmp_
     )
     assert result["samples_ms"] == list(range(1, 16))
     assert result["latency_ms"] == 8
+    assert result["protocol"] == (timing.UNLOCKED_PROTOCOL if unlocked else timing.PROTOCOL)
+    assert result["clock_locked"] is not unlocked
+    assert sum(kind == "clock" for kind, _ in calls) == (0 if unlocked else 33)
     assert [kind for kind, inside in calls if inside and kind != "sync"] == ["op"] * 15
     assert sum(kind == "op" and not inside for kind, inside in calls) == 3
     assert sum(kind == "flush" for kind, _ in calls) == 18
