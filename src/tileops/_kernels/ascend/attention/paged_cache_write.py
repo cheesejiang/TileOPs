@@ -31,6 +31,7 @@ def _quantize_rows(raw, packed, scale, elements: int):
         hi = T.simd.vdup(T.float32(448), "float32")
         sign_mask = T.simd.vdup(T.uint32(128), "uint32")
         nan_code = T.simd.vdup(T.uint32(127), "uint32")
+        magnitude_mask = T.simd.vdup(T.uint32(0x7FFFFFFF), "uint32")
         for part in T.serial(elements // 64):
             original = T.simd.vcvt(
                 T.simd.vld(raw[part * 64], dist="UNPK_B16"), "float32", part=0
@@ -43,15 +44,20 @@ def _quantize_rows(raw, packed, scale, elements: int):
             converted = T.simd.vcvt(
                 bounded, "float8_e4m3fn", full, round="ROUND_R", sat=True, part=0
             )
+            original_bits = T.reinterpret(original, "uint32x64")
+            magnitude = T.simd.vand(original_bits, magnitude_mask, full)
+            # Detect NaNs using integer bits: floating x != x can be folded
+            # under finite-math assumptions or use ordered compare semantics.
+            is_nan = T.simd.vcmps(magnitude, T.uint32(0x7F800000), full, "gt")
             sign = T.simd.vand(
-                T.simd.vshrs(T.reinterpret(original, "uint32x64"), 24, full),
+                T.simd.vshrs(original_bits, 24, full),
                 sign_mask,
                 full,
             )
             bits = T.simd.vsel(
                 T.simd.vor(sign, nan_code, full),
                 T.reinterpret(converted, "uint32x64"),
-                T.simd.vcmp(original, original, full, "ne"),
+                is_nan,
             )
             T.simd.vsts(
                 packed[part * 64], T.reinterpret(bits, "uint8x256"), full, "PK4_B32"

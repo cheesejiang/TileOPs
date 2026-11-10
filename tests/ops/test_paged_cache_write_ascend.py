@@ -20,6 +20,22 @@ def _selected_device():
     return device
 
 
+def _assert_cache_bytes(actual, expected, name):
+    actual_bytes = actual.cpu().contiguous().view(torch.uint8)
+    expected_bytes = expected.contiguous().view(torch.uint8)
+    different = (actual_bytes != expected_bytes).nonzero()
+    if different.numel() == 0:
+        return
+    details = []
+    for position in different[:32].tolist():
+        index = tuple(position)
+        got, want = int(actual_bytes[index]), int(expected_bytes[index])
+        details.append(f"index={index}: actual=0x{got:02x}, expected=0x{want:02x}")
+    raise AssertionError(
+        f"{name}: {different.shape[0]} differing bytes\n" + "\n".join(details)
+    )
+
+
 @pytest.mark.parametrize(
     "n,h,d,npages,page,dtype,fp8",
     [
@@ -74,8 +90,8 @@ def test_scatter(n, h, d, npages, page, dtype, fp8):
     args = [x.to(device) if x is not None else None for x in (k, v, kp, vp, slots, ks, vs)]
     assert PagedKVCacheWriteFwdOp(target=BUILTIN)(*args) is None
     torch.npu.synchronize(device)
-    for actual, reference in zip(args[2:4], expected, strict=True):
-        assert torch.equal(actual.cpu().view(torch.uint8), reference.view(torch.uint8))
+    for name, actual, reference in zip(("K cache", "V cache"), args[2:4], expected, strict=True):
+        _assert_cache_bytes(actual, reference, name)
 
 
 @pytest.mark.smoke
@@ -110,8 +126,8 @@ def test_fp8_special_values(dtype, rows):
     program = build_batched(512, rows + 2, str(dtype).removeprefix("torch."), True, rows, 1)
     program(k, v, kp.view(torch.uint8), vp.view(torch.uint8), slots, scale, scale)
     torch.npu.synchronize(device)
-    assert torch.equal(kp.cpu().view(torch.uint8), expected)
+    _assert_cache_bytes(kp, expected, "FP8 K cache")
     expected[1 : rows + 1] = (
         values.flip(1).float().clamp(-448, 448).to(torch.float8_e4m3fn).view(torch.uint8)
     )
-    assert torch.equal(vp.cpu().view(torch.uint8), expected)
+    _assert_cache_bytes(vp, expected, "FP8 V cache")
