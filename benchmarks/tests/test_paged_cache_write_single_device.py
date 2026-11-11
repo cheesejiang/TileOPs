@@ -32,13 +32,17 @@ class FP8PipelineTests(unittest.TestCase):
         exec(compile(ast.Module(body=[function], type_ignores=[]), str(reference_path), "exec"), namespace)
         reference = lambda *args: namespace["ref_program"](None, *args)
 
-        for dtype in (torch.float16, torch.bfloat16):
-            with self.subTest(dtype=dtype):
+        for dtype, fp8 in (
+            (torch.float16, False), (torch.bfloat16, False),
+            (torch.float16, True), (torch.bfloat16, True),
+        ):
+            with self.subTest(dtype=dtype, fp8=fp8):
                 k = torch.arange(12).reshape(3, 1, 4).to(dtype)
                 v = -k
-                pages = torch.full((2, 2, 1, 4), 0.375).to(torch.float8_e4m3fn)
+                pages = torch.full((2, 2, 1, 4), 0.375).to(torch.float8_e4m3fn if fp8 else dtype)
                 inputs = (k, v, pages, pages.view(torch.uint8).clone().view(pages.dtype),
-                          torch.tensor([3, -1, 0]), torch.tensor([1.25]), torch.tensor([0.75]))
+                          torch.tensor([3, -1, 0]), torch.tensor([1.25]) if fp8 else None,
+                          torch.tensor([0.75]) if fp8 else None)
                 case = types.SimpleNamespace(inputs=inputs, reference=reference)
 
                 def run(*args):
@@ -50,16 +54,18 @@ class FP8PipelineTests(unittest.TestCase):
                 fake_api = types.SimpleNamespace(Implementation=types.SimpleNamespace)
                 with patch.dict("sys.modules", {"benchmarks.api": fake_api}):
                     impl = BENCH.private_inputs(run, inputs, 2, 3)
+                    eager = BENCH.torch_eager(inputs)
                 results = BENCH.benchmark_case(
-                    case, {"test": impl}, None, name="fp8", verify_only=True
+                    case, {"test": impl, "torch-eager": eager}, None, name="fp8", verify_only=True
                 )
                 self.assertEqual(results["test"]["correctness"]["checked_outputs"], 2)
+                self.assertEqual(results["torch-eager"]["correctness"]["checked_outputs"], 2)
                 impl.reset()
                 self.assertTrue(torch.equal(BENCH._bytes(impl.args[2]), BENCH._bytes(pages)))
 
                 def corrupt(*args):
                     result = run(*args)
-                    BENCH._bytes(result[0]).flatten()[0] = 0
+                    BENCH._bytes(result[0]).flatten()[0] ^= 1
                     return result
 
                 impl.run = corrupt

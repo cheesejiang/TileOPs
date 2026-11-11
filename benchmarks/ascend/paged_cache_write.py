@@ -26,6 +26,28 @@ def private_inputs(run, inputs, *positions):
     return Implementation(run=run, args=tuple(args), reset=reset)
 
 
+def torch_eager(inputs):
+    """Uncompiled device-side indexing/quantization; mutate private page pools."""
+    import torch
+
+    def run(k, v, kp, vp, slots, ks, vs):
+        valid = slots >= 0
+        destinations = slots[valid]
+        for source, pool, scale in ((k, kp, ks), (v, vp, vs)):
+            stored = source[valid]
+            if scale is not None:
+                stored = (stored.float() / scale[0]).clamp(-448, 448).to(pool.dtype)
+            # FP8 index_copy is not universally supported by torch_npu.
+            # Scatter the same bytes instead; conversion above remains eager.
+            width_bytes = source.shape[1] * source.shape[2] * pool.element_size()
+            pool.view(torch.uint8).view(-1, width_bytes).index_copy_(
+                0, destinations, stored.contiguous().view(torch.uint8).reshape(-1, width_bytes)
+            )
+        return kp, vp
+
+    return private_inputs(run, inputs, 2, 3)
+
+
 def benchmark_case(case, implementations, timer, *, name, verify_only=False):
     """Full CPU byte validation avoids unsupported FP8 NPU comparison/index ops."""
     import torch
@@ -46,7 +68,17 @@ def benchmark_case(case, implementations, timer, *, name, verify_only=False):
         args = inputs if impl.args is None else impl.args
         if impl.reset is not None:
             impl.reset()
-        actual = impl.run(*args)
+        try:
+            actual = impl.run(*args)
+        except RuntimeError as error:
+            message = str(error)
+            if tag == "torch-eager" and any(
+                text in message.lower() for text in ("not implemented", "dtype support list", "not support")
+            ):
+                results[tag] = {"status": "unsupported", "reason": message}
+                # Do not treat missing eager support as a passed correctness check.
+                continue
+            raise
         if len(actual) != 2 or len(expected) != 2:
             raise AssertionError(f"{tag}: expected exactly two cache outputs")
         for index, (got, want) in enumerate(zip(actual, expected, strict=True)):
@@ -66,6 +98,8 @@ def benchmark_case(case, implementations, timer, *, name, verify_only=False):
     if not verify_only:
         # Establish correctness for every candidate before timing any of them.
         for tag, impl in implementations.items():
+            if results[tag].get("status") == "unsupported":
+                continue
             args = inputs if impl.args is None else impl.args
             results[tag]["measurement"] = timer.measure(
                 impl.run, args, reset=impl.reset, name=f"{name}/{tag}"
@@ -181,12 +215,22 @@ def format_progress(row, index, total):
     implementations = row["implementations"]
     optimized = implementations["tileops"]
     baseline = implementations["generic"]
-    return (
+    message = (
         f"{prefix}: 精度通过 | "
         f"优化 {optimized['measurement']['latency_ms'] * 1000:.3f} µs | "
         f"基线 {baseline['measurement']['latency_ms'] * 1000:.3f} µs | "
         f"加速 {optimized['speedup_vs_generic']:.3f}×"
     )
+    eager = implementations.get("torch-eager")
+    if eager is not None:
+        if "measurement" in eager:
+            message += (
+                f" | torch-eager {eager['measurement']['latency_ms'] * 1000:.3f} µs"
+                f" | 相对 eager {optimized['speedup_vs_torch_eager']:.3f}×"
+            )
+        else:
+            message += " | torch-eager 不支持（详见报告）"
+    return message
 
 
 def write_summary(directory, metadata, rows, *, complete):
@@ -211,18 +255,30 @@ def write_summary(directory, metadata, rows, *, complete):
         f"采样 {options['repeats']} 次；计时前清缓存 {options['flush_mb']} MiB。",
         "- 基线：原始通用 Ascend 内核 `generic`；加速比 = 基线均值 / 当前实现均值。",
         "- 性能对比均直接调用已编译内核；公共 Op 单独验证正确性，不计入内核加速比。",
+        "- torch-eager：NPU 上即时执行筛选、量化、scatter；包含中间张量分配，不含缓存重置或 CPU 传输。",
         "- 正确性使用独立参考检查全部输出及输入保持规则；失败规格不视为验证通过。",
         "",
-        "| 规格 | 实现 | 正确性 | 平均耗时 (µs) | 中位耗时 (µs) | 相对基线加速比 |",
-        "| --- | --- | --- | ---: | ---: | ---: |",
+        "| 规格 | 实现 | 正确性 | 平均耗时 (µs) | 中位耗时 (µs) | 相对基线加速比 | 相对 torch-eager 加速比 |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: |",
     ]
+    eager_unsupported = sum(
+        row.get("implementations", {}).get("torch-eager", {}).get("status") == "unsupported"
+        for row in rows
+    )
+    if eager_unsupported:
+        lines[2:2] = [f"- torch-eager 有 {eager_unsupported} 个规格不受当前环境支持，未验证且无性能数值。"]
     speedups = []
     for row in rows:
         implementations = row.get("implementations", {})
         if row.get("status") == "failed" or not implementations:
-            lines.append(f"| {cell(row['case_id'])} | — | 未完成，见失败详情 | — | — | — |")
+            lines.append(f"| {cell(row['case_id'])} | — | 未完成，见失败详情 | — | — | — | — |")
             continue
         for name, result in implementations.items():
+            if result.get("status") == "unsupported":
+                lines.append(
+                    f"| {cell(row['case_id'])} | {cell(name)} | 不支持，未验证 | — | — | — | — |"
+                )
+                continue
             check = result["correctness"]
             correctness = f"通过（{check['checked_outputs']}/{check['total_outputs']} 输出）"
             measurement = result.get("measurement")
@@ -230,8 +286,10 @@ def write_summary(directory, metadata, rows, *, complete):
             median = f"{measurement['median_ms'] * 1000:.3f}" if measurement else "—"
             speedup = result.get("speedup_vs_generic")
             ratio = f"{speedup:.3f}×" if speedup is not None else "—"
+            eager_speedup = result.get("speedup_vs_torch_eager")
+            eager_ratio = f"{eager_speedup:.3f}×" if eager_speedup is not None else "—"
             lines.append(
-                f"| {cell(row['case_id'])} | {cell(name)} | {correctness} | {mean} | {median} | {ratio} |"
+                f"| {cell(row['case_id'])} | {cell(name)} | {correctness} | {mean} | {median} | {ratio} | {eager_ratio} |"
             )
             if name == "tileops" and speedup is not None:
                 speedups.append(speedup)
@@ -240,6 +298,10 @@ def write_summary(directory, metadata, rows, *, complete):
         lines.extend(["", f"默认优化实现的加速比几何均值：**{geometric:.3f}×**"
                       f"（仅统计 {len(speedups)} 个成功测量的规格）。"])
     for row in rows:
+        eager = row.get("implementations", {}).get("torch-eager", {})
+        if eager.get("status") == "unsupported":
+            lines.extend(["", f"## torch-eager 不支持：{cell(row['case_id'])}", ""])
+            lines.extend("    " + line for line in eager["reason"].splitlines())
         if row.get("error"):
             lines.extend(["", f"## 失败详情：{cell(row['case_id'])}", ""])
             lines.extend("    " + line for line in row["error"].splitlines())
@@ -417,6 +479,7 @@ def main(argv=None):
                 )["public-op"]["correctness"]
                 implementations = candidates("PagedKVCacheWriteFwdOp", case, sweep=args.sweep)
                 implementations["tileops"] = implementations.pop("optimized-kernel")
+                implementations["torch-eager"] = torch_eager(inputs)
                 row["implementations"] = benchmark_case(
                     case, implementations, timer, name=case.id, verify_only=args.verify_only
                 )
@@ -424,8 +487,13 @@ def main(argv=None):
                 if not args.verify_only:
                     measurements = row["implementations"]
                     baseline = measurements["generic"]["measurement"]["latency_ms"]
+                    eager_ms = measurements["torch-eager"].get("measurement", {}).get("latency_ms")
                     for result in measurements.values():
+                        if "measurement" not in result:
+                            continue
                         result["speedup_vs_generic"] = baseline / result["measurement"]["latency_ms"]
+                        if eager_ms is not None:
+                            result["speedup_vs_torch_eager"] = eager_ms / result["measurement"]["latency_ms"]
             except Exception:
                 import traceback
 

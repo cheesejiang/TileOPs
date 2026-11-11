@@ -71,6 +71,20 @@ python scripts/bench_paged_cache_write_ascend.py \
   --run-dir /tmp/paged-cache-write-card3
 ```
 
+The default comparison also includes `torch-eager`: ordinary, uncompiled PyTorch
+operations on the selected NPU. Each invocation filters negative slots, gathers
+input rows, divides/clamps/casts FP8 values when needed, and scatters row bytes
+with `index_copy_`. Intermediate allocations and metadata operations are timed;
+cache reset and CPU reference work are outside timing. `speedup_vs_torch_eager`
+is eager mean latency divided by the measured implementation's mean latency.
+The console and `summary.md` show this additional comparison.
+
+FP8 uses the runtime's native eager cast, never a TileLang quantizer or a CPU
+fallback inside timing. If the installed torch_npu rejects an eager operation,
+the report explicitly records `unsupported`, its error, and no correctness pass
+or performance number for that baseline. Correctness mismatches still fail the
+case. Successful FP8 eager timing therefore depends on native runtime support.
+
 Add `--sweep` to compare row batch sizes 1/4/8/16 at up to 32/64 vector cores,
 or `--verify-only` to skip timing. `--run-dir` is a directory prefix: each run
 automatically appends Shanghai date/time including microseconds, for example
